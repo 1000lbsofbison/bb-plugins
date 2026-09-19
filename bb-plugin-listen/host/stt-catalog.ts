@@ -1,0 +1,501 @@
+/**
+ * Catalog of offline speech-to-text models, ported from pi-listen
+ * (MIT, codexstar69 — see host/UPSTREAM-LICENSE).
+ *
+ * Kept as code rather than data: every entry pairs a download URL set with the
+ * exact file names its sherpa recognizer expects, and the two must not drift
+ * apart. A wrong file name here surfaces as a native crash deep inside
+ * sherpa-onnx, so the pairing belongs somewhere type-checked.
+ *
+ * Model files are verified against the csukuangfj/ and csukuangfj2/ repos on
+ * huggingface.co.
+ */
+
+// ─── Model catalog ───────────────────────────────────────────────────────────
+
+export interface SherpaModelConfig {
+	/** Recognizer type for sherpa-onnx */
+	type: "whisper" | "moonshine" | "sense_voice" | "nemo_ctc" | "transducer";
+	/** Map of role → filename within model directory */
+	files: Record<string, string>;
+	/** Map of role → download URL (HuggingFace or GitHub releases) */
+	downloadUrls: Record<string, string>;
+}
+
+export interface LocalModelInfo {
+	id: string;
+	name: string;
+	/** Human-readable download size */
+	size: string;
+	/** Download size in bytes (for progress tracking + fitness scoring) */
+	sizeBytes: number;
+	/** Peak runtime RAM in MB (~2.5x model file size) */
+	runtimeRamMB: number;
+	notes: string;
+	/** Language family — determines which language list to show */
+	langSupport: "whisper" | "english-only" | "parakeet-multi" | "sensevoice" | "russian-only"
+		| "single-ar" | "single-zh" | "single-ja" | "single-ko" | "single-uk" | "single-vi" | "single-es";
+	/** Device tier: edge (<256 MB), standard (256 MB–1 GB), heavy (>1 GB) */
+	tier: "edge" | "standard" | "heavy";
+	/** Preferred model — best-in-class for its language/use case. Only these get [recommended]. */
+	preferred?: boolean;
+	/** Accuracy rating 1-5 (5 = best). Based on published WER benchmarks. */
+	accuracy: 1 | 2 | 3 | 4 | 5;
+	/** Speed rating 1-5 (5 = fastest). Based on real-time factor and latency benchmarks. */
+	speed: 1 | 2 | 3 | 4 | 5;
+	/** sherpa-onnx model configuration — file paths and download URLs */
+	sherpaModel: SherpaModelConfig;
+}
+
+// HuggingFace base URLs for sherpa-onnx models (verified repos)
+const HF1 = "https://huggingface.co/csukuangfj";
+const HF2 = "https://huggingface.co/csukuangfj2";
+const GH = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+
+// Helper to build HuggingFace resolve URLs
+function hf1(repo: string, file: string): string {
+	return `${HF1}/${repo}/resolve/main/${file}`;
+}
+function hf2(repo: string, file: string): string {
+	return `${HF2}/${repo}/resolve/main/${file}`;
+}
+
+/**
+ * Model catalog — verified against actual HuggingFace repos and file listings.
+ *
+ * Evidence:
+ * - Moonshine v1 (csukuangfj): {preprocess.onnx, encode.int8.onnx, uncached_decode.int8.onnx, cached_decode.int8.onnx, tokens.txt}
+ * - Moonshine v2 (csukuangfj2): {encoder_model.ort, decoder_model_merged.ort, tokens.txt}
+ * - Whisper (csukuangfj): {SIZE-encoder.int8.onnx, SIZE-decoder.int8.onnx, SIZE-tokens.txt}
+ * - SenseVoice (csukuangfj): {model.int8.onnx, tokens.txt}
+ * - GigaAM CTC (csukuangfj): {model.int8.onnx, tokens.txt}
+ * - Parakeet TDT (csukuangfj): {encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt} — transducer!
+ *
+ * Note on Moonshine v2 Small/Medium:
+ *   These exist ONLY as streaming models (moonshine-ai/moonshine) with a different 5-file
+ *   architecture (encoder.ort, frontend.ort, decoder_kv.ort, cross_kv.ort, adapter.ort)
+ *   that is incompatible with sherpa-onnx's moonshine recognizer (which expects 2-file
+ *   encoder+mergedDecoder or 4-file v1 structure). Only Tiny and Base have non-streaming
+ *   variants compatible with sherpa-onnx. See: https://github.com/moonshine-ai/moonshine
+ */
+export const LOCAL_MODELS: LocalModelInfo[] = [
+	// ═══════════════════════════════════════════════════════════════════════
+	// TOP PICKS — best overall models, shown first
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "parakeet-v3", name: "Parakeet TDT v3", size: "~671 MB", sizeBytes: 703_594_496, runtimeRamMB: 1675,
+		notes: "Best multilingual — 25 languages, auto language detection, WER 6.3%", langSupport: "parakeet-multi", tier: "standard", preferred: true, accuracy: 4, speed: 4,
+		sherpaModel: {
+			type: "transducer",
+			files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", joiner: "joiner.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", "encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", "decoder.int8.onnx"),
+				joiner: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", "joiner.int8.onnx"),
+				tokens: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "parakeet-v2", name: "Parakeet TDT v2", size: "~661 MB", sizeBytes: 693_109_760, runtimeRamMB: 1650,
+		notes: "Best English — lowest WER (6.0%), fast, NVIDIA NeMo", langSupport: "english-only", tier: "standard", preferred: true, accuracy: 5, speed: 4,
+		sherpaModel: {
+			type: "transducer",
+			files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", joiner: "joiner.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", "encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", "decoder.int8.onnx"),
+				joiner: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", "joiner.int8.onnx"),
+				tokens: hf1("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", "tokens.txt"),
+			},
+		},
+	},
+	// ═══════════════════════════════════════════════════════════════════════
+	// WHISPER — OpenAI, broadest language support (57 languages)
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "whisper-turbo", name: "Whisper Turbo", size: "~1.0 GB", sizeBytes: 1_087_373_312, runtimeRamMB: 2590,
+		notes: "57 languages, good accuracy, faster than Medium and Large", langSupport: "whisper", tier: "heavy", accuracy: 4, speed: 2,
+		sherpaModel: {
+			type: "whisper",
+			files: { encoder: "turbo-encoder.int8.onnx", decoder: "turbo-decoder.int8.onnx", tokens: "turbo-tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-whisper-turbo", "turbo-encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-whisper-turbo", "turbo-decoder.int8.onnx"),
+				tokens: hf1("sherpa-onnx-whisper-turbo", "turbo-tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "whisper-medium", name: "Whisper Medium", size: "~946 MB", sizeBytes: 991_952_896, runtimeRamMB: 2365,
+		notes: "57 languages, good accuracy, medium speed", langSupport: "whisper", tier: "standard", accuracy: 4, speed: 3,
+		sherpaModel: {
+			type: "whisper",
+			files: { encoder: "medium-encoder.int8.onnx", decoder: "medium-decoder.int8.onnx", tokens: "medium-tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-whisper-medium", "medium-encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-whisper-medium", "medium-decoder.int8.onnx"),
+				tokens: hf1("sherpa-onnx-whisper-medium", "medium-tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "whisper-small", name: "Whisper Small", size: "~375 MB", sizeBytes: 393_216_000, runtimeRamMB: 940,
+		notes: "57 languages, fast, good for low-power devices", langSupport: "whisper", tier: "standard", accuracy: 3, speed: 4,
+		sherpaModel: {
+			type: "whisper",
+			files: { encoder: "small-encoder.int8.onnx", decoder: "small-decoder.int8.onnx", tokens: "small-tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-whisper-small", "small-encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-whisper-small", "small-decoder.int8.onnx"),
+				tokens: hf1("sherpa-onnx-whisper-small", "small-tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "whisper-large", name: "Whisper Large v3", size: "~1.8 GB", sizeBytes: 1_863_319_552, runtimeRamMB: 4440,
+		notes: "57 languages, highest Whisper accuracy, slow on CPU", langSupport: "whisper", tier: "heavy", accuracy: 4, speed: 1,
+		sherpaModel: {
+			type: "whisper",
+			files: { encoder: "large-v3-encoder.int8.onnx", decoder: "large-v3-decoder.int8.onnx", tokens: "large-v3-tokens.txt" },
+			downloadUrls: {
+				encoder: hf1("sherpa-onnx-whisper-large-v3", "large-v3-encoder.int8.onnx"),
+				decoder: hf1("sherpa-onnx-whisper-large-v3", "large-v3-decoder.int8.onnx"),
+				tokens: hf1("sherpa-onnx-whisper-large-v3", "large-v3-tokens.txt"),
+			},
+		},
+	},
+	// ═══════════════════════════════════════════════════════════════════════
+	// MOONSHINE — ultra-fast edge models
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "moonshine-base", name: "Moonshine Base", size: "~287 MB", sizeBytes: 300_940_288, runtimeRamMB: 720,
+		notes: "English only, very fast, handles accents well", langSupport: "english-only", tier: "standard", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				preprocessor: hf1("sherpa-onnx-moonshine-base-en-int8", "preprocess.onnx"),
+				encoder: hf1("sherpa-onnx-moonshine-base-en-int8", "encode.int8.onnx"),
+				uncachedDecoder: hf1("sherpa-onnx-moonshine-base-en-int8", "uncached_decode.int8.onnx"),
+				cachedDecoder: hf1("sherpa-onnx-moonshine-base-en-int8", "cached_decode.int8.onnx"),
+				tokens: hf1("sherpa-onnx-moonshine-base-en-int8", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-tiny", name: "Moonshine Tiny", size: "~124 MB", sizeBytes: 130_023_424, runtimeRamMB: 310,
+		notes: "English only, 5x faster than Whisper Tiny, low accuracy", langSupport: "english-only", tier: "edge", accuracy: 2, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				preprocessor: hf1("sherpa-onnx-moonshine-tiny-en-int8", "preprocess.onnx"),
+				encoder: hf1("sherpa-onnx-moonshine-tiny-en-int8", "encode.int8.onnx"),
+				uncachedDecoder: hf1("sherpa-onnx-moonshine-tiny-en-int8", "uncached_decode.int8.onnx"),
+				cachedDecoder: hf1("sherpa-onnx-moonshine-tiny-en-int8", "cached_decode.int8.onnx"),
+				tokens: hf1("sherpa-onnx-moonshine-tiny-en-int8", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-tiny", name: "Moonshine v2 Tiny", size: "~43 MB", sizeBytes: 45_088_768, runtimeRamMB: 110,
+		notes: "English only, smallest model, 34ms latency, Raspberry Pi friendly", langSupport: "english-only", tier: "edge", preferred: true, accuracy: 2, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	// ═══════════════════════════════════════════════════════════════════════
+	// SPECIALIST — best-in-class for specific languages
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "sensevoice-small", name: "SenseVoice Small", size: "~228 MB", sizeBytes: 239_075_328, runtimeRamMB: 570,
+		notes: "Chinese, English, Japanese, Korean, Cantonese — very fast", langSupport: "sensevoice", tier: "edge", preferred: true, accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "sense_voice",
+			files: { model: "model.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				model: hf1("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", "model.int8.onnx"),
+				tokens: hf1("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "gigaam-v3", name: "GigaAM v3", size: "~225 MB", sizeBytes: 235_929_600, runtimeRamMB: 560,
+		notes: "Russian — fast and accurate, 50% lower WER than Whisper", langSupport: "russian-only", tier: "edge", preferred: true, accuracy: 4, speed: 4,
+		sherpaModel: {
+			type: "nemo_ctc",
+			files: { model: "model.int8.onnx", tokens: "tokens.txt" },
+			downloadUrls: {
+				model: hf1("sherpa-onnx-nemo-ctc-giga-am-v3-russian-2025-12-16", "model.int8.onnx"),
+				tokens: hf1("sherpa-onnx-nemo-ctc-giga-am-v3-russian-2025-12-16", "tokens.txt"),
+			},
+		},
+	},
+	// ═══════════════════════════════════════════════════════════════════════
+	// MOONSHINE v2 LANGUAGE VARIANTS — fast, single-language specialized
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "moonshine-v2-tiny-ja", name: "Moonshine v2 Tiny Japanese", size: "~69 MB", sizeBytes: 72_351_744, runtimeRamMB: 175,
+		notes: "Japanese-specialized, ultra-fast", langSupport: "single-ja", tier: "edge", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-tiny-ja-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-tiny-ja-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-tiny-ja-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-tiny-ko", name: "Moonshine v2 Tiny Korean", size: "~69 MB", sizeBytes: 72_351_744, runtimeRamMB: 175,
+		notes: "Korean-specialized, ultra-fast", langSupport: "single-ko", tier: "edge", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-tiny-ko-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-tiny-ko-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-tiny-ko-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-ar", name: "Moonshine v2 Base Arabic", size: "~135 MB", sizeBytes: 141_557_760, runtimeRamMB: 340,
+		notes: "Arabic-specialized", langSupport: "single-ar", tier: "edge", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-ar-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-ar-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-ar-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-zh", name: "Moonshine v2 Base Chinese", size: "~135 MB", sizeBytes: 141_557_760, runtimeRamMB: 340,
+		notes: "Chinese-specialized", langSupport: "single-zh", tier: "edge", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-zh-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-zh-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-zh-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-ja", name: "Moonshine v2 Base Japanese", size: "~135 MB", sizeBytes: 141_557_760, runtimeRamMB: 340,
+		notes: "Japanese-specialized", langSupport: "single-ja", tier: "edge", accuracy: 3, speed: 4,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-ja-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-ja-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-ja-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-uk", name: "Moonshine v2 Base Ukrainian", size: "~135 MB", sizeBytes: 141_557_760, runtimeRamMB: 340,
+		notes: "Ukrainian-specialized", langSupport: "single-uk", tier: "edge", accuracy: 3, speed: 4,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-uk-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-uk-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-uk-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-vi", name: "Moonshine v2 Base Vietnamese", size: "~135 MB", sizeBytes: 141_557_760, runtimeRamMB: 340,
+		notes: "Vietnamese-specialized", langSupport: "single-vi", tier: "edge", accuracy: 3, speed: 4,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-vi-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-vi-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-vi-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+	{
+		id: "moonshine-v2-base-es", name: "Moonshine v2 Base Spanish", size: "~63 MB", sizeBytes: 66_060_288, runtimeRamMB: 160,
+		notes: "Spanish-specialized", langSupport: "single-es", tier: "edge", accuracy: 3, speed: 5,
+		sherpaModel: {
+			type: "moonshine",
+			files: { encoder: "encoder_model.ort", mergedDecoder: "decoder_model_merged.ort", tokens: "tokens.txt" },
+			downloadUrls: {
+				encoder: hf2("sherpa-onnx-moonshine-base-es-quantized-2026-02-27", "encoder_model.ort"),
+				mergedDecoder: hf2("sherpa-onnx-moonshine-base-es-quantized-2026-02-27", "decoder_model_merged.ort"),
+				tokens: hf2("sherpa-onnx-moonshine-base-es-quantized-2026-02-27", "tokens.txt"),
+			},
+		},
+	},
+];
+
+export const DEFAULT_LOCAL_ENDPOINT = "http://localhost:8080";
+export const DEFAULT_LOCAL_MODEL = "parakeet-v3";
+
+// ─── Language support per model family ───────────────────────────────────────
+// Whisper uses simple ISO 639-1 codes (no regional variants like "en-AU").
+// Parakeet V2 is English-only. Parakeet V3 shares Whisper's language set.
+
+export interface LocalLangEntry { name: string; code: string; popular?: boolean; }
+
+const WHISPER_LANGUAGES: LocalLangEntry[] = [
+	// Popular — shown first
+	{ name: "English", code: "en", popular: true },
+	{ name: "Hindi", code: "hi", popular: true },
+	{ name: "Spanish", code: "es", popular: true },
+	{ name: "French", code: "fr", popular: true },
+	{ name: "German", code: "de", popular: true },
+	{ name: "Portuguese", code: "pt", popular: true },
+	{ name: "Japanese", code: "ja", popular: true },
+	{ name: "Korean", code: "ko", popular: true },
+	{ name: "Chinese", code: "zh", popular: true },
+	{ name: "Arabic", code: "ar", popular: true },
+	{ name: "Russian", code: "ru", popular: true },
+	{ name: "Italian", code: "it", popular: true },
+	// All others alphabetically
+	{ name: "Afrikaans", code: "af" },
+	{ name: "Armenian", code: "hy" },
+	{ name: "Azerbaijani", code: "az" },
+	{ name: "Belarusian", code: "be" },
+	{ name: "Bengali", code: "bn" },
+	{ name: "Bosnian", code: "bs" },
+	{ name: "Bulgarian", code: "bg" },
+	{ name: "Catalan", code: "ca" },
+	{ name: "Croatian", code: "hr" },
+	{ name: "Czech", code: "cs" },
+	{ name: "Danish", code: "da" },
+	{ name: "Dutch", code: "nl" },
+	{ name: "Estonian", code: "et" },
+	{ name: "Finnish", code: "fi" },
+	{ name: "Galician", code: "gl" },
+	{ name: "Greek", code: "el" },
+	{ name: "Hebrew", code: "he" },
+	{ name: "Hungarian", code: "hu" },
+	{ name: "Icelandic", code: "is" },
+	{ name: "Indonesian", code: "id" },
+	{ name: "Kannada", code: "kn" },
+	{ name: "Kazakh", code: "kk" },
+	{ name: "Latvian", code: "lv" },
+	{ name: "Lithuanian", code: "lt" },
+	{ name: "Macedonian", code: "mk" },
+	{ name: "Malay", code: "ms" },
+	{ name: "Maori", code: "mi" },
+	{ name: "Marathi", code: "mr" },
+	{ name: "Nepali", code: "ne" },
+	{ name: "Norwegian", code: "no" },
+	{ name: "Persian", code: "fa" },
+	{ name: "Polish", code: "pl" },
+	{ name: "Romanian", code: "ro" },
+	{ name: "Serbian", code: "sr" },
+	{ name: "Slovak", code: "sk" },
+	{ name: "Slovenian", code: "sl" },
+	{ name: "Swahili", code: "sw" },
+	{ name: "Swedish", code: "sv" },
+	{ name: "Tagalog", code: "tl" },
+	{ name: "Tamil", code: "ta" },
+	{ name: "Telugu", code: "te" },
+	{ name: "Thai", code: "th" },
+	{ name: "Turkish", code: "tr" },
+	{ name: "Ukrainian", code: "uk" },
+	{ name: "Urdu", code: "ur" },
+	{ name: "Vietnamese", code: "vi" },
+	{ name: "Welsh", code: "cy" },
+];
+
+const ENGLISH_ONLY_LANGUAGES: LocalLangEntry[] = [
+	{ name: "English", code: "en", popular: true },
+];
+
+const SENSEVOICE_LANGUAGES: LocalLangEntry[] = [
+	{ name: "Chinese (Mandarin)", code: "zh", popular: true },
+	{ name: "English", code: "en", popular: true },
+	{ name: "Japanese", code: "ja", popular: true },
+	{ name: "Korean", code: "ko", popular: true },
+	{ name: "Cantonese", code: "yue", popular: true },
+];
+
+const RUSSIAN_ONLY_LANGUAGES: LocalLangEntry[] = [
+	{ name: "Russian", code: "ru", popular: true },
+];
+
+// Single-language lists for Moonshine Flavors
+const SINGLE_LANG: Record<string, LocalLangEntry[]> = {
+	ar: [{ name: "Arabic", code: "ar", popular: true }],
+	zh: [{ name: "Chinese", code: "zh", popular: true }],
+	ja: [{ name: "Japanese", code: "ja", popular: true }],
+	ko: [{ name: "Korean", code: "ko", popular: true }],
+	uk: [{ name: "Ukrainian", code: "uk", popular: true }],
+	vi: [{ name: "Vietnamese", code: "vi", popular: true }],
+	es: [{ name: "Spanish", code: "es", popular: true }],
+};
+
+/**
+ * Get the supported language list for a local model.
+ * Returns englishOnly=true when only one language is supported (no picker needed).
+ */
+export function getLanguagesForLocalModel(modelId: string): { languages: LocalLangEntry[]; englishOnly: boolean } {
+	const model = LOCAL_MODELS.find(m => m.id === modelId);
+	if (!model) return { languages: WHISPER_LANGUAGES, englishOnly: false };
+
+	switch (model.langSupport) {
+		case "english-only":
+			return { languages: ENGLISH_ONLY_LANGUAGES, englishOnly: true };
+		case "russian-only":
+			return { languages: RUSSIAN_ONLY_LANGUAGES, englishOnly: true };
+		case "single-ar": return { languages: SINGLE_LANG.ar!, englishOnly: true };
+		case "single-zh": return { languages: SINGLE_LANG.zh!, englishOnly: true };
+		case "single-ja": return { languages: SINGLE_LANG.ja!, englishOnly: true };
+		case "single-ko": return { languages: SINGLE_LANG.ko!, englishOnly: true };
+		case "single-uk": return { languages: SINGLE_LANG.uk!, englishOnly: true };
+		case "single-vi": return { languages: SINGLE_LANG.vi!, englishOnly: true };
+		case "single-es": return { languages: SINGLE_LANG.es!, englishOnly: true };
+		case "sensevoice":
+			return { languages: SENSEVOICE_LANGUAGES, englishOnly: false };
+		case "parakeet-multi":
+		case "whisper":
+		default:
+			return { languages: WHISPER_LANGUAGES, englishOnly: false };
+	}
+}
+
+/**
+ * Check if a language code is supported by a local model.
+ * Used to validate /voice-language changes against current model.
+ */
+export function isLanguageSupportedByModel(modelId: string, langCode: string): boolean {
+	const { languages } = getLanguagesForLocalModel(modelId);
+	// Match base code (e.g. "en" matches "en", regional variants stripped for local)
+	const baseCode = langCode.split("-")[0];
+	return languages.some(l => l.code === baseCode || l.code === langCode);
+}
+
+/**
+ * Find display name for a language code in local model context.
+ */
+export function localLanguageDisplayName(code: string): string {
+	// Check all language lists
+	const allLists = [WHISPER_LANGUAGES, SENSEVOICE_LANGUAGES, RUSSIAN_ONLY_LANGUAGES, ...Object.values(SINGLE_LANG)];
+	for (const list of allLists) {
+		const entry = list.find(l => l.code === code);
+		if (entry) return `${entry.name} (${entry.code})`;
+	}
+	return code;
+}

@@ -1,0 +1,44 @@
+{
+  "name": "bb-plugin-slim-nav",
+  "version": "0.1.0",
+  "description": "Icon-only sidebar navigation for BB with adjustable density.",
+  "author": "sajov",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sajov/bb-plugins.git",
+    "directory": "bb-plugin-slim-nav"
+  },
+  "keywords": [
+    "bb-plugin",
+    "sidebar",
+    "navigation",
+    "icon-only",
+    "density"
+  ],
+  "type": "module",
+  "engines": {
+    "bb": ">=0.42",
+    "bbPluginSdk": ">=0.4.47"
+  },
+  "bb": {
+    "name": "Slim Nav",
+    "description": "Icon-only sidebar navigation with adjustable density, keeping BB's saved order and visibility controls.",
+    "branding": {
+      "icon": "./assets/icon.svg"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.47",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build": "bb plugin build",
+    "typecheck": "tsc --noEmit"
+  }
+}

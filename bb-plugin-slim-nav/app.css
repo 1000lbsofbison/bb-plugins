@@ -1,0 +1,88 @@
+/* Scoped to .slim-nav so nothing here leaks into the rest of the app shell.
+   Sizes come from app.tsx as custom properties; the fallbacks match the
+   "compact" density. Customize mode is left untouched so the sidebar editor
+   keeps its full labels and controls. */
+
+.slim-nav {
+  --slim-nav-size: 28px;
+  --slim-nav-icon: 16px;
+  --slim-nav-gap: 4px;
+}
+
+.slim-nav
+  [data-testid="plugin-nav-sidebar-items"]:not([data-sidebar-navigation-customize-mode]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--slim-nav-gap);
+  padding: 6px 8px 2px;
+}
+
+.slim-nav
+  [data-testid="plugin-nav-sidebar-items"]:not([data-sidebar-navigation-customize-mode])
+  > :is([data-sidebar-navigation-item], [data-testid="sidebar-navigation-more-row"]) {
+  width: var(--slim-nav-size);
+  height: var(--slim-nav-size);
+  flex: 0 0 var(--slim-nav-size);
+  margin: 0;
+}
+
+.slim-nav [data-sidebar-navigation-item] > button,
+.slim-nav [data-testid="sidebar-navigation-more-row"] > button {
+  width: var(--slim-nav-size);
+  height: var(--slim-nav-size);
+  min-height: var(--slim-nav-size);
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+}
+
+/* Keep the host's label in the accessibility tree while showing only the icon. */
+.slim-nav
+  [data-sidebar-navigation-item]
+  > button
+  > :is(span, div):not([data-plugin-icon-asset]),
+.slim-nav [data-testid="sidebar-navigation-more-row"] > button > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.slim-nav [data-sidebar-navigation-item] > button > svg,
+.slim-nav [data-sidebar-navigation-item] > button > [data-plugin-icon-asset] {
+  width: var(--slim-nav-icon);
+  height: var(--slim-nav-icon);
+}
+
+/* Trailing text rendered next to the row (badges, counts) has no room here. */
+.slim-nav [data-sidebar-navigation-item] > :is(div, span) {
+  display: none;
+}
+
+.slim-nav [data-sidebar-navigation-item] > button[aria-current="page"] {
+  color: var(--primary);
+  background: var(--sidebar-accent);
+}
+
+[data-testid="sidebar-navigation-region"]:has(.slim-nav[data-slim-nav-hide-divider])
+  + [data-testid="app-sidebar-navigation-divider"] {
+  display: none;
+}
+
+/* Touch targets need the roomy size regardless of the density setting.
+   `!important` is required: app.tsx sets these properties inline, and inline
+   declarations otherwise win over any stylesheet rule. */
+@media (pointer: coarse) {
+  .slim-nav {
+    --slim-nav-size: 40px !important;
+    --slim-nav-icon: 20px !important;
+    --slim-nav-gap: 6px;
+  }
+}
