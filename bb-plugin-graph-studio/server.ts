@@ -35,6 +35,14 @@ import { MIGRATIONS, createStore, type RunRow, type RunStatus } from "./lib/stor
 import { RENAMED_TEMPLATES, TEMPLATES, searchGraphs } from "./lib/templates";
 import { whileWorkspaceBusy } from "./lib/workspace";
 import { ACTIVITY_EVENT_TYPES, describeActivity } from "./lib/activity";
+import {
+  answerRefusal,
+  answerSource,
+  approvalMessage,
+  approvalSettledMessage,
+  type AnswerSource,
+  type MessagePart,
+} from "./lib/approval";
 
 const problemSchema = z.object({
   level: z.enum(["error", "warning"]),
@@ -157,7 +165,12 @@ export const rpcContract = defineRpcContract({
     output: z.object({ runs: z.array(runSchema) }),
   },
   answerHuman: {
-    input: z.object({ runId: z.string(), answer: z.string().max(4000) }),
+    input: z.object({
+      runId: z.string(),
+      answer: z.string().max(4000),
+      /** The approval the panel showed; guards against answering a newer one. */
+      nodeId: z.string().optional(),
+    }),
     output: z.object({ run: runSchema.nullable() }),
   },
   stopRun: {
@@ -360,6 +373,62 @@ export default function graphStudio(bb: BbPluginApi) {
   >();
   /** Runs whose stop was requested; checked between nodes. */
   const stopping = new Set<string>();
+  /**
+   * Approvals posted into the thread that started the run, keyed by run. Only
+   * these owe the chat a closing note when they are settled elsewhere. In
+   * memory like `pending`: after a reload the note is skipped, and the tool
+   * still refuses an answer to a settled approval.
+   */
+  const announced = new Map<string, { threadId: string; label: string }>();
+
+  /** Best effort: a message that cannot be delivered must not stall a run. */
+  async function postToThread(runId: string, threadId: string, input: MessagePart[]) {
+    try {
+      // `queue-if-active`: the starting thread may still be in the turn that
+      // started the run, and a steer would cut that turn short.
+      await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input });
+    } catch (cause) {
+      bb.log.warn(
+        `[run ${runId}] Could not post to thread ${threadId}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+
+  /** Ask in the starting thread. Only human nodes: a dialogue has its own worker. */
+  function announceApproval(
+    row: RunRow,
+    ask: { nodeId: string; label: string; question: string },
+  ) {
+    if (!row.threadId) return;
+    const node = row.graph.nodes.find((entry) => entry.id === ask.nodeId);
+    if (node?.kind !== "human") return;
+    announced.set(row.id, { threadId: row.threadId, label: ask.label });
+    void postToThread(
+      row.id,
+      row.threadId,
+      approvalMessage({ runId: row.id, graphName: row.graph.name, ...ask }),
+    );
+  }
+
+  /** Close the chat's approval when it was settled anywhere but the chat. */
+  function settleAnnouncement(
+    runId: string,
+    outcome:
+      | { kind: "answered"; answer: string; source: AnswerSource }
+      | { kind: "stopped" },
+  ) {
+    const entry = announced.get(runId);
+    if (!entry) return;
+    announced.delete(runId);
+    if (outcome.kind === "answered" && outcome.source === "chat") return;
+    void postToThread(
+      runId,
+      entry.threadId,
+      approvalSettledMessage({ runId, label: entry.label, outcome }),
+    );
+  }
 
   /**
    * The current activity line per node_run, in memory only.
@@ -828,6 +897,7 @@ export default function graphStudio(bb: BbPluginApi) {
           Date.now(),
         );
         publish();
+        announceApproval(row, value);
         return;
       }
 
@@ -902,13 +972,25 @@ export default function graphStudio(bb: BbPluginApi) {
     return runId;
   }
 
-  function answerHuman(runId: string, answer: string) {
+  /**
+   * Synchronous from the check to the status change, so of two answers racing
+   * in from chat and panel exactly one resumes the run; the other is refused.
+   */
+  function answerHuman(
+    runId: string,
+    answer: string,
+    via: { source: AnswerSource; nodeId?: string } = { source: "elsewhere" },
+  ) {
     const row = store.getRun(runId);
     if (!row) throw new Error(`No run ${runId}.`);
-    if (row.status !== "waiting-human") {
-      throw new Error("That run is not waiting for an answer right now.");
-    }
+    const refusal = answerRefusal({
+      status: row.status,
+      pendingNodeId: pending.get(runId)?.nodeId ?? null,
+      expectedNodeId: via.nodeId,
+    });
+    if (refusal) throw new Error(refusal);
     pending.delete(runId);
+    settleAnnouncement(runId, { kind: "answered", answer, source: via.source });
     store.updateRun(
       runId,
       { status: "running", state: row.state, error: null },
@@ -956,6 +1038,8 @@ export default function graphStudio(bb: BbPluginApi) {
     }
     stopping.delete(runId);
     pending.delete(runId);
+    // A rerun replays the graph and asks again if it reaches the node again.
+    announced.delete(runId);
     store.updateRun(
       runId,
       { status: "running", state: row.state, error: null },
@@ -970,6 +1054,7 @@ export default function graphStudio(bb: BbPluginApi) {
     const row = store.getRun(runId);
     if (row && row.status === "waiting-human") {
       pending.delete(runId);
+      settleAnnouncement(runId, { kind: "stopped" });
       store.updateRun(
         runId,
         { status: "stopped", state: row.state, error: null },
@@ -1068,8 +1153,8 @@ export default function graphStudio(bb: BbPluginApi) {
         }),
       };
     },
-    answerHuman: ({ runId, answer }) => {
-      answerHuman(runId, answer);
+    answerHuman: ({ runId, answer, nodeId }) => {
+      answerHuman(runId, answer, { source: "panel", nodeId });
       return { run: toDto(runId) };
     },
     stopRun: ({ runId }) => {
@@ -1286,7 +1371,14 @@ export default function graphStudio(bb: BbPluginApi) {
         case "answer": {
           const [runId, ...answer] = rest;
           if (!runId) return fail("Usage: bb graph-studio answer <run-id> <answer>");
-          answerHuman(runId, answer.join(" "));
+          const row = store.getRun(runId);
+          try {
+            answerHuman(runId, answer.join(" "), {
+              source: answerSource(ctx.threadId, row?.threadId ?? null),
+            });
+          } catch (cause) {
+            return fail(cause instanceof Error ? cause.message : String(cause));
+          }
           return ok("Answer taken.");
         }
         case "stop": {
@@ -1434,6 +1526,33 @@ export default function graphStudio(bb: BbPluginApi) {
         projectId: ctx.projectId,
       });
       return `Run ${startedId} started.`;
+    },
+  });
+
+  // The chat's way to answer an approval the run posted into it. Without a
+  // tool the agent would have to know the CLI, and a guessed command is how
+  // an answer ends up nowhere.
+  bb.agents.registerTool({
+    name: "graph_studio_answer",
+    description:
+      "Answer a Graph Studio run that is waiting at a human approval node, and let it continue. Use it only with what the user decided — never approve or answer on your own. Pass the runId and nodeId from the approval message and the user's answer in their own words. If the approval was already answered elsewhere, the tool says so; tell the user instead of retrying.",
+    parameters: z.object({
+      runId: z.string(),
+      nodeId: z.string().optional(),
+      answer: z.string().min(1).max(4000),
+    }),
+    execute: async ({ runId, nodeId, answer }, ctx) => {
+      const row = store.getRun(runId);
+      if (!row) return `No run ${runId}.`;
+      try {
+        answerHuman(runId, answer, {
+          source: answerSource(ctx.threadId, row.threadId),
+          nodeId,
+        });
+      } catch (cause) {
+        return cause instanceof Error ? cause.message : String(cause);
+      }
+      return `Answer taken; run ${runId} continues.`;
     },
   });
 

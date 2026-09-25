@@ -1,6 +1,7 @@
 // The Graph Studio panel: library → run → inspect.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Markdown,
   useBbContext,
   useBbNavigate,
   useRealtime,
@@ -280,7 +281,7 @@ function RunView({
   run: RunDto;
   pending: boolean;
   checkpoints: Checkpoint[];
-  onAnswer: (answer: string) => void;
+  onAnswer: (answer: string, nodeId: string) => void;
   onStop: () => void;
   onBack: () => void;
   onRerunFrom: (checkpointId: string) => void;
@@ -397,7 +398,14 @@ function RunView({
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             The run is waiting for you
           </p>
-          <p className="mt-1 text-sm">{run.pendingQuestion.question}</p>
+          {/*
+            The question is rendered from the run's outputs and is usually
+            Markdown — tables above all — which read as noise in a <p>.
+          */}
+          <Markdown
+            className="mt-1 max-h-[50vh] overflow-auto text-sm"
+            content={run.pendingQuestion.question}
+          />
           <div className="mt-2 flex gap-2">
             <Input
               value={answer}
@@ -410,7 +418,7 @@ function RunView({
               size="sm"
               disabled={pending || answer.trim() === ""}
               onClick={() => {
-                onAnswer(answer.trim());
+                onAnswer(answer.trim(), run.pendingQuestion!.nodeId);
                 setAnswer("");
               }}
             >
@@ -976,9 +984,9 @@ export function GraphStudioPanel({
                   rpc.call("rerunFrom", { runId: openRun.id, checkpointId }),
                 )
               }
-              onAnswer={(answer) =>
+              onAnswer={(answer, nodeId) =>
                 void run(() =>
-                  rpc.call("answerHuman", { runId: openRun.id, answer }),
+                  rpc.call("answerHuman", { runId: openRun.id, answer, nodeId }),
                 )
               }
               onStop={() =>

@@ -196,6 +196,47 @@ describe("Full screen", () => {
     expect(slot.getByLabelText("Answer to the approval")).toBeTruthy();
   });
 
+  // The question is usually Markdown; as plain text a table is a wall of pipes.
+  it("hands the question to the host Markdown renderer", async () => {
+    const slot = await openRun(
+      makeRun({
+        status: "waiting-human",
+        pendingQuestion: {
+          nodeId: "approval",
+          label: "Approval",
+          question: "**Move these?**\n\n| Note | Target |\n| --- | --- |\n| a.md | Projects |",
+        },
+      }),
+    );
+    // The host renders Markdown; the harness stands in with a marked div, so
+    // what can be checked here is that the question goes to it, whole.
+    const rendered = await slot.findByTestId("bb-markdown");
+    expect(rendered.textContent).toContain("| a.md | Projects |");
+    expect(rendered.tagName).not.toBe("P");
+  });
+
+  it("answers the approval it showed, naming its node", async () => {
+    const calls: unknown[] = [];
+    const waiting = makeRun({
+      status: "waiting-human",
+      pendingQuestion: { nodeId: "approval", label: "Approval", question: "Go?" },
+    });
+    const slot = panel({
+      listRuns: () => ({ runs: [waiting] }),
+      answerHuman: (input: unknown) => {
+        calls.push(input);
+        return { run: null };
+      },
+    });
+    fireEvent.click(await slot.findByText(/A task/));
+    fireEvent.change(await slot.findByLabelText("Answer to the approval"), {
+      target: { value: "yes" },
+    });
+    fireEvent.click(slot.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({ runId: "run_1", answer: "yes", nodeId: "approval" });
+  });
+
   it("comes back with Escape", async () => {
     const slot = await openRun(makeRun());
     fireEvent.click(slot.getByRole("button", { name: "Full screen" }));
