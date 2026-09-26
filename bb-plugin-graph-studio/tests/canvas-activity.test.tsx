@@ -6,10 +6,10 @@
 // that something does *not* appear is green when it appears nowhere, which is
 // the same result as a feature that was never wired up. So each rule below is
 // pinned twice — once where it must show, once where it must not.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { graphSchema, type Graph } from "../lib/graph";
-import { GraphCanvas } from "../components/graph-canvas";
+import { GraphCanvas, colorLightness } from "../components/graph-canvas";
 
 afterEach(cleanup);
 
@@ -122,3 +122,133 @@ describe("the canvas while a node runs", () => {
     expect(screen.queryByText(/^\d+:\d\d$/u)).toBeNull();
   });
 });
+
+describe("the canvas as an editor", () => {
+  const connectable = (container: HTMLElement) =>
+    container.querySelectorAll(".react-flow__handle.connectable").length;
+
+  it("offers handles to draw an edge when it can take one", () => {
+    const { container } = render(
+      <GraphCanvas graph={graph()} onConnect={() => {}} />,
+    );
+    expect(connectable(container)).toBeGreaterThan(0);
+  });
+
+  it("offers none on a canvas that only shows a run", () => {
+    const { container } = render(<GraphCanvas graph={graph()} />);
+    expect(container.querySelectorAll(".react-flow__handle").length).toBeGreaterThan(0);
+    expect(connectable(container)).toBe(0);
+  });
+
+  it("lets Start be selected where the terminals have a card", () => {
+    render(<GraphCanvas graph={graph()} terminalsSelectable />);
+    expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+  });
+
+  it("keeps Start inert where it has nothing to show", () => {
+    render(<GraphCanvas graph={graph()} />);
+    expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
+  });
+});
+
+/**
+ * React Flow paints its chrome light unless told otherwise, which is what put
+ * white surfaces into a dark BB. The mode is read from the theme's resolved
+ * background, in whichever colour syntax the host resolves it to.
+ */
+describe("colorLightness", () => {
+  it("reads a dark theme as dark", () => {
+    expect(colorLightness("oklch(0.145 0 0)")).toBeLessThan(0.5);
+    expect(colorLightness("rgb(20, 20, 20)")).toBeLessThan(0.5);
+  });
+
+  it("reads a light theme as light", () => {
+    expect(colorLightness("oklch(1 0 0)")).toBeGreaterThan(0.5);
+    expect(colorLightness("oklch(98% 0 0)")).toBeGreaterThan(0.5);
+    expect(colorLightness("rgb(255, 255, 255)")).toBeGreaterThan(0.5);
+  });
+
+  it("admits it cannot tell rather than guessing", () => {
+    expect(colorLightness("")).toBeNull();
+    expect(colorLightness("transparent")).toBeNull();
+  });
+});
+
+describe("the canvas's edge insert", () => {
+  it("offers a + on each edge where the editor can splice", () => {
+    render(<GraphCanvas graph={graph()} onInsertOnEdge={() => {}} />);
+    expect(
+      screen.getByRole("button", { name: "Insert a node between explore and write" }),
+    ).toBeTruthy();
+  });
+
+  it("offers none on a canvas that only shows a run", () => {
+    render(<GraphCanvas graph={graph()} />);
+    expect(screen.queryByRole("button", { name: /Insert a node/ })).toBeNull();
+  });
+});
+
+describe("moving nodes", () => {
+  const nodeEl = (container: HTMLElement, id: string) =>
+    container.querySelector(`.react-flow__node[data-id="${id}"]`) as HTMLElement;
+
+  it("lets the editor drag nodes", () => {
+    const { container } = render(<GraphCanvas graph={graph()} onMoveNode={() => {}} />);
+    expect(nodeEl(container, "explore").classList.contains("draggable")).toBe(true);
+  });
+
+  it("keeps a run's nodes where they are", () => {
+    const { container } = render(<GraphCanvas graph={graph()} />);
+    expect(nodeEl(container, "explore").classList.contains("draggable")).toBe(false);
+  });
+
+  it("draws a node where its author put it", () => {
+    const placed = { ...graph(), positions: { explore: { x: 512, y: 384 } } };
+    const { container } = render(<GraphCanvas graph={placed} />);
+    expect(nodeEl(container, "explore").style.transform).toContain("512px");
+  });
+
+  it("draws an unplaced node by the computed layout", () => {
+    const { container } = render(<GraphCanvas graph={graph()} />);
+    expect(nodeEl(container, "explore").style.transform).not.toContain("512px");
+  });
+
+  it("shows no library attribution in the corner", () => {
+    const { container } = render(<GraphCanvas graph={graph()} />);
+    expect(container.querySelector(".react-flow__attribution")).toBeNull();
+  });
+});
+
+describe("a subgraph node as an import", () => {
+  const child = graphSchema.parse({
+    id: "child",
+    name: "Child flow",
+    nodes: [{ id: "inner", label: "Inner", kind: "agent", prompt: "x" }],
+    edges: [
+      { from: START, to: "inner" },
+      { from: "inner", to: END },
+    ],
+  });
+  const parent = graphSchema.parse({
+    id: "parent",
+    name: "Parent",
+    nodes: [{ id: "sub", label: "Sub", kind: "subgraph", graphId: "child" }],
+    edges: [
+      { from: START, to: "sub" },
+      { from: "sub", to: END },
+    ],
+  });
+
+  it("names what it imports and opens it in place", () => {
+    render(<GraphCanvas graph={parent} resolveGraph={(id) => (id === "child" ? child : null)} />);
+    expect(screen.getByText(/imports Child flow/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open the imported graph Child flow" }));
+    expect(screen.getByRole("img", { name: "Imported graph Child flow" })).toBeTruthy();
+  });
+
+  it("offers nothing to open when the import cannot be resolved", () => {
+    render(<GraphCanvas graph={parent} />);
+    expect(screen.queryByRole("button", { name: /imported graph/ })).toBeNull();
+  });
+});
+

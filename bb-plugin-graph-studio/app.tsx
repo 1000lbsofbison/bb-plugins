@@ -5,6 +5,7 @@ import {
   GraphStudioPanel,
 } from "./components/graph-studio-panel";
 import { GraphStudioRunBanner } from "./components/run-banner";
+import { GraphRunCard } from "./components/run-card";
 
 /** `params` crosses the host boundary as JSON — read it, never trust it. */
 function runIdFrom(params: unknown): string | null {
@@ -42,6 +43,10 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "run", component: GraphStudioRunBanner, chrome: "bare" }],
   });
+
+  // The run inline in the message that started it: `::graph-run{run="…"}`,
+  // which graph_studio_run tells the agent to put in its reply.
+  app.slots.messageDirective({ id: "graph-run", component: GraphRunCard });
 
   app.slots.experimental_threadHeaderAction({
     id: "open-graph-studio",

@@ -7,11 +7,14 @@ import {
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { RunDto, rpcContract } from "../server";
+import type { NodeRunDto, RunDto, rpcContract } from "../server";
 import { KIND_LABEL, edgeKey, fanOutProgress, type Graph } from "../lib/graph";
 import { describeCost, runCommand, runTotal } from "../lib/describe";
 import { activityByNode } from "../lib/activity";
+import { suggestGraphs } from "../lib/suggest";
 import { GraphPicker } from "./graph-picker";
+import { RunTimeline } from "./run-timeline";
+import { FullscreenLayer } from "./fullscreen";
 import { GraphCanvas, CanvasLegend, type NodeVisualStatus } from "./graph-canvas";
 import { GraphEditor, type AvailableSkill } from "./graph-editor";
 import { ExportedFileView, type ExportedFile } from "./exported-file";
@@ -21,7 +24,7 @@ import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-const RUN_STATUS: Record<RunDto["status"], string> = {
+export const RUN_STATUS: Record<RunDto["status"], string> = {
   running: "running",
   "waiting-human": "waiting for you",
   done: "done",
@@ -30,7 +33,7 @@ const RUN_STATUS: Record<RunDto["status"], string> = {
 };
 
 /** Latest attempt per node decides the colour on the canvas. */
-function statusesFromRun(run: RunDto | null): Record<string, NodeVisualStatus> {
+export function statusesFromRun(run: RunDto | null): Record<string, NodeVisualStatus> {
   if (!run) return {};
   const out: Record<string, NodeVisualStatus> = {};
   for (const nodeRun of run.nodeRuns) {
@@ -55,7 +58,7 @@ function statusesFromRun(run: RunDto | null): Record<string, NodeVisualStatus> {
  * changes nothing — its counter would freeze at the exact moment the reader
  * starts wondering whether anything is still happening.
  */
-function useNow(active: boolean): number {
+export function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -67,7 +70,7 @@ function useNow(active: boolean): number {
 }
 
 /** Edges between consecutive completed nodes — the path the run actually took. */
-function travelledEdges(run: RunDto | null): Set<string> {
+export function travelledEdges(run: RunDto | null): Set<string> {
   if (!run) return new Set();
   const order = [...run.nodeRuns]
     .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
@@ -154,17 +157,29 @@ function NodeInspector({
   run,
   nodeId,
   onClose,
+  focusAttemptId = null,
 }: {
   graph: Graph;
   run: RunDto | null;
   nodeId: string;
   onClose: () => void;
+  /** The attempt picked on the timeline — shown first and marked. */
+  focusAttemptId?: string | null;
 }) {
   const navigate = useBbNavigate();
+  const [tab, setTab] = useState<"attempts" | "prompt" | "fields">("attempts");
   const node = graph.nodes.find((entry) => entry.id === nodeId);
   const attempts = (run?.nodeRuns ?? []).filter(
     (entry) => entry.nodeId === nodeId,
   );
+  // Picked on the timeline: bring that attempt into view.
+  useEffect(() => {
+    if (!focusAttemptId) return;
+    setTab("attempts");
+    document
+      .getElementById(`gs-attempt-${focusAttemptId}`)
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [focusAttemptId]);
   if (!node) return null;
 
   return (
@@ -182,6 +197,39 @@ function NodeInspector({
         </Button>
       </div>
       <div className="space-y-3 px-3 py-3">
+        {/* Three questions, three tabs: what happened (the attempts, first
+            because that is why one clicks a node in a run), what it was told,
+            and what it answered in fields. */}
+        <div
+          role="tablist"
+          aria-label="Inspector sections"
+          className="flex gap-0.5 rounded-md bg-muted/50 p-0.5 text-[11px]"
+        >
+          {(
+            [
+              ["attempts", `Attempts · ${attempts.length}`],
+              ["prompt", "Prompt"],
+              ...(node.fields.length > 0 ? [["fields", `Fields · ${node.fields.length}`]] : []),
+            ] as Array<[typeof tab, string]>
+          ).map(([key, text]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={tab === key}
+              onClick={() => setTab(key)}
+              className={cn(
+                "flex-1 truncate rounded px-2 py-1",
+                tab === key
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+        <div role="tabpanel" hidden={tab !== "fields"}>
         {node.fields.length > 0 ? (
           <div>
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -204,6 +252,8 @@ function NodeInspector({
             </dl>
           </div>
         ) : null}
+        </div>
+        <div role="tabpanel" hidden={tab !== "prompt"}>
         {node.prompt ? (
           <div>
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -214,15 +264,27 @@ function NodeInspector({
             </pre>
           </div>
         ) : null}
+          {node.prompt ? null : (
+            <p className="text-xs text-muted-foreground">This node has no prompt.</p>
+          )}
+        </div>
+        <div role="tabpanel" hidden={tab !== "attempts"} className="space-y-2">
         {attempts.length === 0 ? (
           <p className="text-xs text-muted-foreground">
             Not run yet in this run.
           </p>
         ) : (
           attempts.map((attempt) => (
-            <div key={attempt.id} className="rounded-md border border-border p-2">
+            <div
+              key={attempt.id}
+              id={`gs-attempt-${attempt.id}`}
+              className={cn(
+                "rounded-md border border-border p-2",
+                attempt.id === focusAttemptId && "border-primary ring-1 ring-primary/40",
+              )}
+            >
               <p className="flex items-center justify-between text-xs">
-                <span className="font-medium">Versuch {attempt.attempt}</span>
+                <span className="font-medium">Attempt {attempt.attempt}</span>
                 <span className="text-muted-foreground">{attempt.status}</span>
               </p>
               {describeCost(attempt) ? (
@@ -260,6 +322,7 @@ function NodeInspector({
             </div>
           ))
         )}
+        </div>
       </div>
     </div>
   );
@@ -277,7 +340,9 @@ function RunView({
   onStop,
   onBack,
   onRerunFrom,
+  resolveGraph,
 }: {
+  resolveGraph: (id: string) => Graph | null;
   run: RunDto;
   pending: boolean;
   checkpoints: Checkpoint[];
@@ -287,21 +352,20 @@ function RunView({
   onRerunFrom: (checkpointId: string) => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [focusAttempt, setFocusAttempt] = useState<string | null>(null);
+  const selectNode = (id: string | null) => {
+    setSelected(id);
+    setFocusAttempt(null);
+  };
   const [answer, setAnswer] = useState("");
   /**
-   * Focus mode: the canvas takes the column, everything explanatory steps
-   * aside. While a flow runs, the graph *is* the interface — it says where the
+   * Full screen: the canvas takes the window, the details move into a
+   * sidebar. While a flow runs, the graph *is* the interface — it says where the
    * work stands — and the prose around it is what you read once, at the start.
    */
   const [focus, setFocus] = useState(false);
-  useEffect(() => {
-    if (!focus) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFocus(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [focus]);
+  // Stable, so the full-screen layer's Escape listener is bound once.
+  const closeFocus = useCallback(() => setFocus(false), []);
   const label = (id: string) =>
     run.graph.nodes.find((node) => node.id === id)?.label ?? id;
   const branches = useMemo(() => fanOutProgress(run.graph, run.state), [run]);
@@ -322,78 +386,11 @@ function RunView({
   const doneCount = run.nodeRuns.filter((node) => node.status === "done").length;
   const total = runTotal(run.nodeRuns);
 
-  return (
-    <div
-      className={cn(
-        focus
-          ? // Fill the column and let the canvas have whatever is left after
-            // the strip and a pending question. A fixed canvas height would
-            // guess wrong the moment the run asks something.
-            "flex h-[calc(100dvh-5rem)] flex-col gap-2"
-          : "space-y-3",
-      )}
-    >
-      {focus ? (
-        <div className="flex shrink-0 items-center gap-2 text-xs">
-          <span className="truncate font-medium">{run.graph.name}</span>
-          <span
-            className={cn(
-              "shrink-0 text-muted-foreground",
-              run.status === "failed" && "text-destructive",
-              run.status === "waiting-human" && "text-primary",
-            )}
-          >
-            {RUN_STATUS[run.status]} · {doneCount} done
-          </span>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="-mr-2 ml-auto h-6 shrink-0 px-2"
-            onClick={() => setFocus(false)}
-          >
-            <Icon name="X" className="size-4" />
-            Leave full screen
-          </Button>
-        </div>
-      ) : (
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <Button size="sm" variant="ghost" className="-ml-2 h-6 px-2" onClick={onBack}>
-            <Icon name="ChevronLeft" className="size-4" />
-            Overview
-          </Button>
-          <p className="mt-1 truncate text-sm font-medium">{run.graph.name}</p>
-          <p className="truncate text-xs text-muted-foreground">„{run.input}"</p>
-        </div>
-        <div className="shrink-0 text-right">
-          <p
-            className={cn(
-              "text-xs font-medium",
-              run.status === "failed" && "text-destructive",
-              run.status === "waiting-human" && "text-primary",
-            )}
-          >
-            {RUN_STATUS[run.status]}
-          </p>
-          <p className="text-[11px] text-muted-foreground">
-            {doneCount} nodes done · {run.state.steps} steps
-          </p>
-          {total ? (
-            // The run total, so choosing a model per node is a decision with a
-            // number behind it rather than a feeling.
-            <p className="text-[11px] text-muted-foreground">{total}</p>
-          ) : null}
-        </div>
-      </div>
-      )}
-
-      {/*
-        Never hidden by focus mode. A run that waits for an answer and says so
-        nowhere is a run that quietly stops — the failure this project keeps
-        rediscovering. The graph alone cannot tell you: a waiting node looks
-        much like a working one.
-      */}
-      {run.pendingQuestion ? (
+  // The question and the error are never hidden by full screen. A run that
+  // waits for an answer and says so nowhere is a run that quietly stops — the
+  // failure this project keeps rediscovering. The graph alone cannot tell you:
+  // a waiting node looks much like a working one.
+  const questionBlock = run.pendingQuestion ? (
         <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/[0.04] px-3 py-3">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             The run is waiting for you
@@ -426,118 +423,183 @@ function RunView({
             </Button>
           </div>
         </div>
-      ) : null}
+  ) : null;
 
-      {run.error ? (
+  const errorBlock = run.error ? (
         <p className="shrink-0 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {run.error}
         </p>
-      ) : null}
+  ) : null;
+
+  /**
+   * The nodes the viewport keeps centred: every one working right now, or the
+   * one waiting for an answer.
+   */
+  const activeNodes = [
+    ...new Set([
+      ...run.nodeRuns
+        .filter((entry) => entry.status === "running")
+        .map((entry) => entry.nodeId),
+      ...(run.pendingQuestion ? [run.pendingQuestion.nodeId] : []),
+    ]),
+  ];
+
+  const timeline = (
+    <RunTimeline
+      nodeRuns={run.nodeRuns}
+      // Restart points only for a run that is not moving.
+      checkpoints={run.status === "running" ? [] : checkpoints}
+      label={label}
+      selectedAttemptId={focusAttempt}
+      onSelectAttempt={(attempt: NodeRunDto) => {
+        setSelected(attempt.nodeId);
+        setFocusAttempt(attempt.id);
+      }}
+      onRestart={onRerunFrom}
+      pending={pending}
+    />
+  );
+
+  const stopButton =
+    run.status === "running" || run.status === "waiting-human" ? (
+      <Button size="sm" variant="destructive" className="h-7" disabled={pending} onClick={onStop}>
+        Stop the run
+      </Button>
+    ) : null;
+
+  const canvasFor = (className: string) => (
+    <GraphCanvas
+      graph={run.graph}
+      statuses={statuses}
+      branches={branches}
+      selectedId={selected}
+      onSelect={selectNode}
+      activeEdgeKeys={travelled}
+      followIds={activeNodes}
+      resolveGraph={resolveGraph}
+      visits={run.state.visits ?? {}}
+      dimUnreached={run.nodeRuns.length > 0}
+      activity={activity}
+      now={now}
+      className={className}
+    />
+  );
+
+  const inspector = selected ? (
+    <NodeInspector
+      key={selected}
+      graph={run.graph}
+      run={run}
+      nodeId={selected}
+      focusAttemptId={focusAttempt}
+      onClose={() => selectNode(null)}
+    />
+  ) : (
+    <p className="text-xs text-muted-foreground">
+      Click a node to see its prompt, result and child thread.
+    </p>
+  );
+
+  /*
+    Full screen: the graph gets the window, and what it is about — the open
+    question, the error, the node being inspected — moves into a sidebar
+    beside it. The old focus mode only hid the prose and left the canvas as
+    narrow as the panel.
+  */
+  if (focus) {
+    return (
+      <FullscreenLayer
+        title={run.graph.name}
+        status={
+          <span
+            className={cn(
+              run.status === "failed" && "text-destructive",
+              run.status === "waiting-human" && "text-primary",
+            )}
+          >
+            {RUN_STATUS[run.status]} · {doneCount} done · {run.state.steps} steps
+            {total ? ` · ${total}` : ""}
+          </span>
+        }
+        onClose={closeFocus}
+        actions={stopButton}
+        sidebar={
+          <div className="space-y-3">
+            {questionBlock}
+            {errorBlock}
+            {inspector}
+          </div>
+        }
+      >
+        <div className="flex h-full flex-col gap-1.5">
+          <div className="flex justify-end">
+            <CanvasLegend />
+          </div>
+          {canvasFor("min-h-0 flex-1 h-auto max-h-none")}
+          {timeline}
+        </div>
+      </FullscreenLayer>
+    );
+  }
+
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <Button size="sm" variant="ghost" className="-ml-2 h-6 px-2" onClick={onBack}>
+            <Icon name="ChevronLeft" className="size-4" />
+            Overview
+          </Button>
+          <p className="mt-1 truncate text-sm font-medium">{run.graph.name}</p>
+          <p className="truncate text-xs text-muted-foreground">„{run.input}"</p>
+        </div>
+        <div className="shrink-0 text-right">
+          <p
+            className={cn(
+              "text-xs font-medium",
+              run.status === "failed" && "text-destructive",
+              run.status === "waiting-human" && "text-primary",
+            )}
+          >
+            {RUN_STATUS[run.status]}
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            {doneCount} nodes done · {run.state.steps} steps
+          </p>
+          {total ? (
+            // The run total, so choosing a model per node is a decision with a
+            // number behind it rather than a feeling.
+            <p className="text-[11px] text-muted-foreground">{total}</p>
+          ) : null}
+        </div>
+      </div>
+
+      {questionBlock}
+
+      {errorBlock}
 
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-1">
         <CanvasLegend />
-        {!focus ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px]"
-            onClick={() => setFocus(true)}
-          >
-            Full screen
-          </Button>
-        ) : null}
-      </div>
-
-      <div className={cn("relative", focus && "min-h-0 flex-1")}>
-        <GraphCanvas
-          graph={run.graph}
-          statuses={statuses}
-          branches={branches}
-          selectedId={selected}
-          onSelect={setSelected}
-          activeEdgeKeys={travelled}
-          activity={activity}
-          now={now}
-          className={focus ? "h-full max-h-none" : "max-h-[55vh]"}
-        />
-        {focus && selected ? (
-          // Over the canvas rather than under it: in focus mode there is no
-          // "under", and pushing the graph up to make room would undo the
-          // point of the mode.
-          <div className="absolute inset-x-0 bottom-0 max-h-[60%] overflow-auto rounded-t-lg border border-border bg-card p-2 shadow-lg">
-            <NodeInspector
-              graph={run.graph}
-              run={run}
-              nodeId={selected}
-              onClose={() => setSelected(null)}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {!focus ? (
-        selected ? (
-          <NodeInspector
-            graph={run.graph}
-            run={run}
-            nodeId={selected}
-            onClose={() => setSelected(null)}
-          />
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            Click a node to see its prompt, result and child thread.
-          </p>
-        )
-      ) : null}
-
-      {!focus && run.status !== "running" && checkpoints.length > 0 ? (
-        <details className="rounded-lg border border-border bg-card">
-          <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium">
-            Replay from a step
-          </summary>
-          <div className="space-y-2 border-t border-border px-3 py-3">
-            <p className="text-[11px] text-muted-foreground">
-              Continues the run from an earlier point. Steps already done are
-              not run again — their results come from the checkpoint. Changes to
-              the graph take effect straight away.
-            </p>
-            {checkpoints.map((checkpoint) => (
-              <div
-                key={checkpoint.checkpointId}
-                className="flex items-center justify-between gap-3"
-              >
-                <span className="min-w-0 text-xs">
-                  before{" "}
-                  <span className="font-medium">
-                    {checkpoint.next.map(label).join(", ")}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {checkpoint.doneCount}{" "}
-                    {checkpoint.doneCount === 1 ? "result" : "results"} available
-                  </span>
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0"
-                  disabled={pending}
-                  onClick={() => onRerunFrom(checkpoint.checkpointId)}
-                >
-                  <Icon name="RotateCcw" className="size-4" />
-                  Restart here
-                </Button>
-              </div>
-            ))}
-          </div>
-        </details>
-      ) : null}
-
-      {!focus && (run.status === "running" || run.status === "waiting-human") ? (
-        <Button size="sm" variant="destructive" disabled={pending} onClick={onStop}>
-          Stop the run
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-[11px]"
+          onClick={() => setFocus(true)}
+        >
+          Full screen
         </Button>
-      ) : null}
+      </div>
+
+      {canvasFor("max-h-[55vh]")}
+
+      {timeline}
+
+      {inspector}
+
+
+
+      {stopButton}
     </div>
   );
 }
@@ -584,20 +646,59 @@ function Library({
   const [importText, setImportText] = useState("");
   const active = graphId || graphs[0]?.id || "";
   const preview = graphs.find((graph) => graph.id === active) ?? null;
+  const suggestions = useMemo(
+    () => suggestGraphs(graphs, task).filter((graph) => graph.id !== active),
+    [graphs, task, active],
+  );
+  // Runs that want attention come first: a run waiting for an answer that
+  // sits at the bottom of a list is a run that quietly stops.
+  const activeRuns = runs.filter(
+    (entry) => entry.status === "running" || entry.status === "waiting-human",
+  );
 
   return (
     <div className="space-y-4">
+      {activeRuns.length > 0 ? (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Active
+          </p>
+          <ul className="space-y-1">
+            {activeRuns.map((entry) => (
+              <li key={entry.id}>
+                <button
+                  type="button"
+                  onClick={() => onOpenRun(entry.id)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm hover:bg-state-hover",
+                    entry.status === "waiting-human"
+                      ? "border-primary/50 bg-primary/[0.04]"
+                      : "border-border bg-card",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "size-2 shrink-0 rounded-full",
+                      entry.status === "waiting-human" ? "bg-primary" : "animate-pulse bg-primary/70",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{entry.graph.name}</span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {RUN_STATUS[entry.status]}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       <div className="rounded-lg border border-border bg-card px-3 py-3">
-        <p className="text-sm font-medium">Start a run</p>
+        <p className="text-sm font-medium">What should be done?</p>
         <div className="mt-2 space-y-2">
           {/* No caption above: the card says "Start a run" and the options
               are graph names. The label was a line of height for nothing. */}
-          <GraphPicker
-            graphs={graphs}
-            value={active}
-            onChange={onGraphIdChange}
-            disabled={pending}
-          />
+
           <Input
             value={task}
             onChange={(event) => onTaskChange(event.target.value)}
@@ -609,6 +710,30 @@ function Library({
             // "what does this one expect from me".
             placeholder={preview?.example || "What should be worked on?"}
             aria-label="Task"
+            disabled={pending}
+          />
+          {/* Graphs whose name, example or description share words with the
+              task. A hint beside the picker, not a replacement for it. */}
+          {suggestions.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1 text-[11px]">
+              <span className="text-muted-foreground">Fits the task:</span>
+              {suggestions.map((graph) => (
+                <button
+                  key={graph.id}
+                  type="button"
+                  onClick={() => onGraphIdChange(graph.id)}
+                  className="rounded-full border border-border px-2 py-0.5 hover:border-primary hover:text-foreground"
+                  aria-label={`Use ${graph.name}`}
+                >
+                  {graph.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <GraphPicker
+            graphs={graphs}
+            value={active}
+            onChange={onGraphIdChange}
             disabled={pending}
           />
           <div className="flex gap-2">
@@ -643,6 +768,13 @@ function Library({
                 Or on the command line:
               </p>
               <CopyCommand command={runCommand(preview, task)} />
+              {/* The chat is where flows are written and changed; "#" there
+                  names a graph without its id. */}
+              <p className="pt-1 text-[11px] text-muted-foreground">
+                Or in the chat — design a new flow, change or run this one:
+              </p>
+              <CopyCommand command="/graph-studio Build me a flow that …" />
+              <CopyCommand command={`/graph-studio Run #${preview.id} on …`} />
             </div>
           ) : null}
         </div>
@@ -668,6 +800,46 @@ function Library({
         </div>
       ) : null}
 
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Runs
+        </p>
+        {runs.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No runs yet.</p>
+        ) : (
+          <ul className="divide-y divide-border rounded-lg border border-border bg-card">
+            {runs.map((run) => (
+              <li key={run.id}>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-state-hover"
+                  onClick={() => onOpenRun(run.id)}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm">{run.graph.name}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground">
+                      „{run.input}"
+                    </span>
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 text-[11px]",
+                      run.status === "failed" && "text-destructive",
+                      run.status === "waiting-human" && "text-primary",
+                    )}
+                  >
+                    {RUN_STATUS[run.status]}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Last: writing a graph to a file is a utility reached for now and
+          then, not a step in starting a run. */}
       <details className="rounded-lg border border-border bg-card">
         <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium">
           File: export / import
@@ -740,43 +912,6 @@ function Library({
           </div>
         </div>
       </details>
-
-      <div className="space-y-2">
-        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          Runs
-        </p>
-        {runs.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No runs yet.</p>
-        ) : (
-          <ul className="divide-y divide-border rounded-lg border border-border bg-card">
-            {runs.map((run) => (
-              <li key={run.id}>
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-state-hover"
-                  onClick={() => onOpenRun(run.id)}
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm">{run.graph.name}</span>
-                    <span className="block truncate text-[11px] text-muted-foreground">
-                      „{run.input}"
-                    </span>
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 text-[11px]",
-                      run.status === "failed" && "text-destructive",
-                      run.status === "waiting-human" && "text-primary",
-                    )}
-                  >
-                    {RUN_STATUS[run.status]}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
     </div>
   );
 }
@@ -975,6 +1110,9 @@ export function GraphStudioPanel({
         {view.kind === "run" ? (
           openRun ? (
             <RunView
+              resolveGraph={(id) =>
+                [...graphs, ...templates].find((entry) => entry.id === id) ?? null
+              }
               run={openRun}
               pending={pending}
               checkpoints={checkpoints}
@@ -1016,6 +1154,10 @@ export function GraphStudioPanel({
             exporting={exporting}
             onDismissExport={() => setExported(null)}
             graphId={view.graphId}
+            // Editing an existing graph is work on the graph, so it gets the
+            // window. A new one starts here, next to the template picker.
+            startFullscreen={view.graphId !== null}
+            onOpenGraph={(id) => setView({ kind: "edit", graphId: id })}
             pending={pending}
             onCancel={() => setView({ kind: "library" })}
             onSave={(graph) =>

@@ -53,6 +53,17 @@ describe("graph_studio_run", () => {
     expect(tool).toMatch(/only context/i);
     expect(tool).toMatch(/attachments/i);
   });
+
+  /** The reply carries the live card; without the directive there is none. */
+  it("hands the agent the inline card for its reply", () => {
+    const tool = toolSource("graph_studio_run");
+    expect(tool).toContain('::graph-run{run="${startedId}"}');
+  });
+
+  it("names the directive nowhere else", () => {
+    const others = source.replace(toolSource("graph_studio_run"), "");
+    expect(others).not.toContain("::graph-run{");
+  });
 });
 
 /**
@@ -81,5 +92,37 @@ describe("the help text points at the agent route", () => {
     const quoted = help.match(/start ([a-z][a-z0-9-]*) with it/);
     expect(quoted, "the example should name a graph").not.toBeNull();
     expect(TEMPLATES.map((graph) => graph.id)).toContain(quoted![1]);
+  });
+});
+
+describe("writing graphs from the chat", () => {
+  it("registers a tool that returns a graph as JSON", () => {
+    expect(toolSource("graph_studio_get")).toContain("toGraphFile");
+  });
+
+  it("saves through the validator and reports its findings", () => {
+    const tool = toolSource("graph_studio_save");
+    expect(tool).toContain("validateGraph");
+    expect(tool).toContain("fromGraphFile");
+  });
+
+  /** A template is code; a stored row with its id would shadow it. */
+  it("refuses to overwrite a shipped template", () => {
+    expect(toolSource("graph_studio_save")).toMatch(/shipped template/);
+  });
+
+  it("lists graphs under # in the composer", () => {
+    const provider = source.slice(source.indexOf("registerMentionProvider"));
+    expect(provider).toContain('triggers: ["#"]');
+  });
+
+  it("ships the /graph-studio skill", () => {
+    const skill = readFileSync("skills/graph-studio/SKILL.md", "utf8");
+    expect(skill).toMatch(/^---\nname: graph-studio\n/);
+    expect(skill).toContain("graph_studio_save");
+  });
+
+  it("points a sentence given to the CLI at the chat", () => {
+    expect(source).toContain("reads like a request, not a command");
   });
 });

@@ -1292,6 +1292,11 @@ export default function graphStudio(bb: BbPluginApi) {
     "agent in that thread; it reads all of it and starts the run itself:",
     "",
     '  "Summarise what we settled here and start concept-domain with it"',
+    "",
+    "New flows are designed the same way, in natural language, in a chat:",
+    "",
+    '  /graph-studio Build me a flow that reviews a change, loops until clean,',
+    "                and asks me before merging",
   ].join("\n");
 
   bb.cli.register({
@@ -1466,6 +1471,14 @@ export default function graphStudio(bb: BbPluginApi) {
           }
         }
         default:
+          // "bb graph-studio build me a flow that …" is a sentence, not a
+          // command. The CLI cannot write a graph — an agent can, so the
+          // answer points there instead of at the command list.
+          if (argv.length > 2) {
+            return fail(
+              `"${argv.join(" ")}" reads like a request, not a command.\nDesign flows in a chat:\n\n  /graph-studio ${argv.join(" ")}\n\nCommands: bb graph-studio --help`,
+            );
+          }
           return fail(`Unknown command "${command}".\n\n${usageText}`);
       }
     },
@@ -1525,7 +1538,118 @@ export default function graphStudio(bb: BbPluginApi) {
         threadId: ctx.threadId,
         projectId: ctx.projectId,
       });
-      return `Run ${startedId} started.`;
+      // The directive renders the run live in the reply — its status, the
+      // question it waits on and an answer box — and keeps the final picture
+      // in the conversation afterwards.
+      return `Run ${startedId} started.\n\nPut this line into your reply exactly once, on its own line and outside any code block, so the user can watch the run in the chat:\n::graph-run{run="${startedId}"}`;
+    },
+  });
+
+  /*
+    Writing graphs from the chat. The studio is for reviewing and adjusting;
+    authoring is meant to happen in natural language — "/graph-studio build me
+    a flow that …" — with the agent reading a similar graph, writing the JSON,
+    and saving it through here. The validator's findings come back in the
+    result, so the agent fixes its own mistakes before the user sees them.
+  */
+  bb.agents.registerTool({
+    name: "graph_studio_get",
+    description:
+      "Return one Graph Studio graph as JSON (the same format graph_studio_save accepts). Read a similar graph or template first when writing a new one, and read the current graph before changing it — save replaces the whole graph.",
+    parameters: z.object({ graphId: z.string() }),
+    execute: async ({ graphId }) => {
+      const graph = resolveGraph(graphId);
+      if (!graph) {
+        return `No graph "${graphId}". Available:\n${describeLibrary(libraryGraphs())}`;
+      }
+      return toGraphFile(graph);
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "graph_studio_save",
+    description: [
+      "Create or replace a Graph Studio graph from JSON, then report the validator's findings. Fix every error and save again before telling the user it is done.",
+      "",
+      "Shape (defaults may be left out): { id: lowercase-kebab, name, description, example: a real task in the user's words, nodes: [...], edges: [...] }.",
+      "Node: { id, label, kind: agent | dialog | human | note | subgraph, prompt, skills: [skill ids], fields: [{ name, type: string|number|boolean|enum|list, options?: [..] }], maxVisits, maxAttempts, onError: stop|route, routing: first|every, providerId + model (both or neither; leave out to inherit the thread's model), graphId (subgraph only: the graph it imports) }.",
+      "Prompts read {{input}} (the run's task) and {{node_id}} (an earlier node's result).",
+      "Edge: { from, to, when?: { source: output|field, key, op: contains|notContains|equals|matches|visitsBelow|failed|succeeded|always, value }, fanOutOver?: 'node.listField', handoffFrom?: 'node.field' }. Start is \"__start__\", End is \"__end__\". An edge back to an earlier node makes a cycle; give the looping node a maxVisits.",
+      "Shipped templates cannot be overwritten — save under a new id. Set overwrite: true to replace an existing graph of the user's.",
+    ].join("\n"),
+    parameters: z.object({
+      json: z.string().min(2).max(200_000),
+      overwrite: z.boolean().optional(),
+    }),
+    execute: async ({ json, overwrite }) => {
+      let graph: Graph;
+      try {
+        graph = fromGraphFile(json);
+      } catch (cause) {
+        return cause instanceof Error ? cause.message : String(cause);
+      }
+      if (TEMPLATES.some((entry) => entry.id === graph.id)) {
+        return `"${graph.id}" is a shipped template. Save it under a different id.`;
+      }
+      const existing = store.getGraph(graph.id);
+      if (existing && !overwrite) {
+        return `A graph "${graph.id}" already exists. Read it with graph_studio_get, then save with overwrite: true — or choose another id.`;
+      }
+      // Positions the author dragged in the studio survive an agent's edit
+      // unless the new JSON brings its own.
+      if (existing && Object.keys(graph.positions).length === 0) {
+        graph = {
+          ...graph,
+          positions: Object.fromEntries(
+            Object.entries(existing.positions ?? {}).filter(
+              ([id]) => id === START_NODE || id === END_NODE || graph.nodes.some((node) => node.id === id),
+            ),
+          ),
+        };
+      }
+      const saved = store.saveGraph(graph, Date.now());
+      publish();
+      const problems = validateGraph(saved, resolveGraph);
+      const errors = problems.filter((problem) => problem.level === "error");
+      return [
+        `${existing ? "Replaced" : "Saved"} ${saved.id} (${saved.nodes.length} nodes, ${saved.edges.length} edges).`,
+        errors.length > 0
+          ? `Not runnable yet — ${errors.length} error(s):\n${errors.map((problem) => `- ${problem.message}`).join("\n")}`
+          : "Runnable.",
+        ...problems
+          .filter((problem) => problem.level === "warning")
+          .map((problem) => `- warning: ${problem.message}`),
+        "",
+        "The user can review it in Graph Studio (panel → Edit), or run it with graph_studio_run.",
+      ].join("\n");
+    },
+  });
+
+  // "#" in the composer lists the graphs; a picked one reaches the agent as
+  // its description, so "#review-flow run it on the auth change" needs no id.
+  bb.ui.registerMentionProvider({
+    id: "graphs",
+    label: "Graph Studio",
+    triggers: ["#"],
+    search: ({ query }) =>
+      searchGraphs(libraryGraphs(), query)
+        .slice(0, 12)
+        .map((graph) => ({
+          id: graph.id,
+          title: graph.name,
+          subtitle: graph.example || `${graph.nodes.length} nodes`,
+          icon: "Workflow",
+        })),
+    resolve: (itemId) => {
+      const graph = resolveGraph(itemId);
+      if (!graph) throw new Error(`Graph Studio has no graph "${itemId}".`);
+      return {
+        context: [
+          `The user refers to the Graph Studio graph "${graph.id}".`,
+          describeGraph(graph, validateGraph(graph, resolveGraph)),
+          "Use graph_studio_run to run it, graph_studio_get and graph_studio_save to change it.",
+        ].join("\n\n"),
+      };
     },
   });
 

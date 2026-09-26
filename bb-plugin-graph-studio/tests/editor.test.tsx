@@ -9,7 +9,7 @@
 // hosts BB's own provider/model picker, and the SDK hooks behind it only exist
 // inside a plugin app. `renderSlot` supplies that context for a single
 // component, so these stay fast unit tests instead of loading the bundle.
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { GraphEditor } from "../components/graph-editor";
@@ -273,7 +273,7 @@ describe("GraphEditor", () => {
 
     it("says Default when a node deviates in nothing", () => {
       open();
-      expect(screen.getByText("Default")).toBeTruthy();
+      expect(screen.getAllByText("Default").length).toBeGreaterThan(0);
     });
   });
 });
@@ -528,5 +528,474 @@ describe("GraphEditor > taking the target from a field", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     const saved = onSave.mock.calls[0]![0] as { edges: Array<{ handoffFrom: string }> };
     expect(saved.edges[1]!.handoffFrom).toBe("a.next");
+  });
+});
+
+/**
+ * Editing in the graph. Nodes and edges used to be two separate lists; now a
+ * node's card holds its settings and exactly its own edges. Each rule is
+ * pinned both ways, since a card that shows nothing would pass every
+ * "does not show" check.
+ */
+describe("GraphEditor > node card", () => {
+  const probe = () => ({
+    ...TEMPLATES[0]!,
+    id: "probe",
+    name: "Probe",
+    nodes: [
+      { ...TEMPLATES[0]!.nodes[0]!, id: "a", label: "Alpha" },
+      { ...TEMPLATES[0]!.nodes[0]!, id: "b", label: "Beta" },
+    ],
+    edges: [
+      { from: "__start__", to: "a", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "a", to: "b", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "b", to: "__end__", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+    ],
+  });
+
+  const open = (onSave: () => void = noop) =>
+    editor({
+      graphs: [probe()],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+
+  const pick = (label: string) => {
+    const picker = screen.getByLabelText("Edit node") as HTMLSelectElement;
+    const option = [...picker.options].find((entry) =>
+      entry.text.startsWith(label),
+    )!;
+    fireEvent.change(picker, { target: { value: option.value } });
+  };
+
+  it("opens on the first node with its incoming and outgoing edges", () => {
+    open();
+    expect(screen.getByLabelText("Id of node 1")).toBeTruthy();
+    expect(screen.getByLabelText("Source of edge 1")).toBeTruthy();
+    expect(screen.getByLabelText("Source of edge 2")).toBeTruthy();
+  });
+
+  it("leaves out edges that do not touch the node", () => {
+    open();
+    expect(screen.queryByLabelText("Source of edge 3")).toBeNull();
+    expect(screen.queryByLabelText("Id of node 2")).toBeNull();
+  });
+
+  it("switches to another node's card and its edges", () => {
+    open();
+    pick("Beta");
+    expect(screen.getByLabelText("Id of node 2")).toBeTruthy();
+    expect(screen.getByLabelText("Source of edge 3")).toBeTruthy();
+    expect(screen.queryByLabelText("Source of edge 1")).toBeNull();
+  });
+
+  it("shows Start's outgoing edges and no node settings", () => {
+    open();
+    pick("Start");
+    expect(screen.getByLabelText("Source of edge 1")).toBeTruthy();
+    expect(screen.queryByLabelText(/^Id of node/)).toBeNull();
+  });
+
+  it("adds an outgoing edge from the card", () => {
+    const onSave = vi.fn();
+    open(onSave);
+    fireEvent.click(screen.getByRole("button", { name: "Outgoing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saved = onSave.mock.calls[0]![0] as { edges: Array<{ from: string; to: string }> };
+    expect(saved.edges).toHaveLength(4);
+    expect(saved.edges[3]).toMatchObject({ from: "a", to: "__end__" });
+  });
+
+  it("takes the edges along when a node is renamed", () => {
+    const onSave = vi.fn();
+    open(onSave);
+    fireEvent.change(screen.getByLabelText("Id of node 1"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saved = onSave.mock.calls[0]![0] as { edges: Array<{ from: string; to: string }> };
+    expect(saved.edges[0]!.to).toBe("first");
+    expect(saved.edges[1]!.from).toBe("first");
+  });
+
+  /**
+   * Renaming onto another node's id is a typo in progress, not a merge — and
+   * the keystroke after it must not carry the other node's edges off either.
+   */
+  it("leaves the edges alone while the id collides with another node", () => {
+    open();
+    const id = screen.getByLabelText("Id of node 1");
+    fireEvent.change(id, { target: { value: "b" } });
+    fireEvent.change(id, { target: { value: "c" } });
+    // Node 1's edges were not moved onto "b", so they name the vanished "a"
+    // and land in the list where they can still be reached and fixed.
+    expect(screen.getByText("Edges pointing at no node")).toBeTruthy();
+    // Beta kept its own way to End instead of handing it to "c".
+    pick("Beta");
+    expect(
+      (screen.getByLabelText("Source of edge 3") as HTMLSelectElement).value,
+    ).toBe("b");
+  });
+
+  it("has no stray list while every edge names a node", () => {
+    open();
+    expect(screen.queryByText("Edges pointing at no node")).toBeNull();
+  });
+});
+
+/**
+ * Full screen in the editor: the graph takes the window, and the node card
+ * moves into a sidebar beside it instead of queueing up underneath.
+ */
+describe("GraphEditor > full screen", () => {
+  const open = () =>
+    editor({
+      graphs: [TEMPLATES[0]!],
+      templates: TEMPLATES,
+      graphId: TEMPLATES[0]!.id,
+      pending: false,
+      onSave: noop,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+  const layer = () => screen.queryByRole("dialog", { name: /full screen/ });
+
+  it("is closed until asked for", () => {
+    open();
+    expect(layer()).toBeNull();
+  });
+
+  it("opens over the window with the node card in its sidebar", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Full screen" }));
+    const opened = layer()!;
+    expect(opened).not.toBeNull();
+    expect(opened.parentElement).toBe(document.body);
+    expect(within(opened).getByLabelText("Id of node 1")).toBeTruthy();
+    expect(within(opened).getByRole("button", { name: "Save" })).toBeTruthy();
+    // One card, not a second copy left behind in the panel.
+    expect(screen.getAllByLabelText("Id of node 1")).toHaveLength(1);
+  });
+
+  it("closes with Escape", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Full screen" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(layer()).toBeNull();
+    expect(screen.getByLabelText("Id of node 1")).toBeTruthy();
+  });
+});
+
+describe("GraphEditor > edge rows", () => {
+  const probe = () => ({
+    ...TEMPLATES[0]!,
+    id: "probe",
+    name: "Probe",
+    nodes: [
+      { ...TEMPLATES[0]!.nodes[0]!, id: "a", label: "Alpha" },
+      { ...TEMPLATES[0]!.nodes[0]!, id: "b", label: "Beta" },
+    ],
+    edges: [
+      { from: "__start__", to: "a", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "a", to: "b", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "b", to: "__end__", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+    ],
+  });
+  const open = () => {
+    editor({
+      graphs: [probe()],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave: noop,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+  };
+
+  it("jumps to the node at the other end", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Go to Beta" }));
+    expect(screen.getByLabelText("Id of node 2")).toBeTruthy();
+    expect(screen.queryByLabelText("Id of node 1")).toBeNull();
+  });
+
+  it("names each edge's other end in its folded line", () => {
+    open();
+    expect(screen.getByRole("button", { name: "Go to Start" })).toBeTruthy();
+    // Node 1 has no edge to End, so there is nothing to jump there.
+    expect(screen.queryByRole("button", { name: "Go to End" })).toBeNull();
+  });
+});
+
+/**
+ * The reported "error" on switching a node to Subgraph: nothing crashed, but
+ * the validator raised problems the card gave no way to fix (a hidden prompt)
+ * and no explanation of what the kind does.
+ */
+describe("GraphEditor > subgraph node", () => {
+  const withKind = (kind: string, extra: Record<string, unknown> = {}) => ({
+    ...TEMPLATES[0]!,
+    id: "probe",
+    name: "Probe",
+    nodes: [
+      { ...TEMPLATES[0]!.nodes[0]!, id: "a", label: "Alpha", kind, ...extra },
+      { ...TEMPLATES[0]!.nodes[0]!, id: "b", label: "Beta", prompt: "Go" },
+    ],
+    edges: [
+      { from: "__start__", to: "a", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "a", to: "b", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "b", to: "__end__", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+    ],
+  });
+  const open = (graph: unknown, onSave: () => void = noop) =>
+    editor({
+      graphs: [graph],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+
+  it("explains what the kind does", () => {
+    open(withKind("subgraph", { prompt: "" }));
+    expect(screen.getByText(/What a subgraph does/)).toBeTruthy();
+  });
+
+  it("says nothing of the sort on an agent", () => {
+    open(withKind("agent"));
+    expect(screen.queryByText(/What a subgraph does/)).toBeNull();
+  });
+
+  it("shows the node's own problem in its card", () => {
+    open(withKind("subgraph", { prompt: "", graphId: "" }));
+    const card = screen.getByLabelText("Node Alpha");
+    expect(within(card as HTMLElement).getByText(/names no graph/)).toBeTruthy();
+  });
+
+  it("offers to clear a prompt left over from the previous kind", () => {
+    const onSave = vi.fn();
+    open(
+      withKind("subgraph", { prompt: "Old instruction", graphId: TEMPLATES[1]!.id }),
+      onSave,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clear them" }));
+    expect(screen.queryByRole("button", { name: "Clear them" })).toBeNull();
+  });
+
+  it("offers nothing to clear when nothing is left over", () => {
+    open(withKind("subgraph", { prompt: "", graphId: TEMPLATES[1]!.id }));
+    expect(screen.queryByRole("button", { name: "Clear them" })).toBeNull();
+  });
+
+  it("lists the ids the embedded graph makes readable", () => {
+    const child = TEMPLATES[1]!;
+    open(withKind("subgraph", { prompt: "", graphId: child.id }));
+    expect(screen.getByText(`{{${child.nodes[0]!.id}}}`)).toBeTruthy();
+  });
+});
+
+describe("GraphEditor > full screen sidebar", () => {
+  it("shows the graph's settings when no node is selected", () => {
+    editor({
+      graphs: [TEMPLATES[0]!],
+      templates: TEMPLATES,
+      graphId: TEMPLATES[0]!.id,
+      pending: false,
+      startFullscreen: true,
+      onSave: noop,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+    const layer = screen.getByRole("dialog", { name: /full screen/ });
+    expect(within(layer).queryByLabelText("Graph name")).toBeNull();
+    fireEvent.change(within(layer).getByLabelText("Edit node"), {
+      target: { value: "" },
+    });
+    expect(within(layer).getByLabelText("Graph name")).toBeTruthy();
+  });
+});
+
+describe("GraphEditor > card tabs, kinds, history, leaving, inserting", () => {
+  const probe = () => ({
+    ...TEMPLATES[0]!,
+    id: "probe",
+    name: "Probe",
+    nodes: [
+      { ...TEMPLATES[0]!.nodes[0]!, id: "a", label: "Alpha", kind: "agent" },
+      { ...TEMPLATES[0]!.nodes[0]!, id: "b", label: "Beta", kind: "agent" },
+    ],
+    edges: [
+      { from: "__start__", to: "a", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "a", to: "b", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+      { from: "b", to: "__end__", when: null, label: "", fanOutOver: "", handoffFrom: "" },
+    ],
+  });
+  const open = (props: Record<string, unknown> = {}) =>
+    editor({
+      graphs: [probe()],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave: noop,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+      ...props,
+    });
+
+  // No block of facts above the sections: the folded sections' summaries
+  // are the overview.
+  it("folds every section and says what is set in its summary", () => {
+    open();
+    const card = screen.getByLabelText("Node Alpha");
+    const sections = [...card.querySelectorAll("details")].filter(
+      (entry) => entry.parentElement === card,
+    );
+    expect(sections.length).toBeGreaterThan(3);
+    expect(sections.every((entry) => !entry.open)).toBe(true);
+    const model = sections.find((entry) => entry.textContent?.startsWith("Model"))!;
+    expect(within(model.querySelector("summary")!).getByText("inherited")).toBeTruthy();
+    expect(within(card).queryByText("inherited from the thread")).toBeNull();
+  });
+
+  it("names a chosen model there instead of the inherited one", () => {
+    const graph = probe();
+    graph.nodes[0] = {
+      ...graph.nodes[0]!,
+      providerId: "claude-code",
+      model: "claude-opus-5",
+    } as never;
+    editor({
+      graphs: [graph],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave: noop,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+    const card = screen.getByLabelText("Node Alpha");
+    const model = [...card.querySelectorAll("summary")].find((entry) =>
+      entry.textContent?.startsWith("Model"),
+    )!;
+    expect(model.textContent).toContain("claude-opus-5");
+    expect(model.textContent).not.toContain("inherited");
+  });
+
+  it("switches the kind with its button", () => {
+    const onSave = vi.fn();
+    open({ onSave });
+    const kinds = screen.getByRole("radiogroup", { name: "Kind of node 1" });
+    expect(
+      within(kinds).getByRole("radio", { name: /Agent/ }).getAttribute("aria-checked"),
+    ).toBe("true");
+    fireEvent.click(within(kinds).getByRole("radio", { name: /Note/ }));
+    expect(
+      within(kinds).getByRole("radio", { name: /Note/ }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      within(kinds).getByRole("radio", { name: /Agent/ }).getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("offers nothing to undo before anything changed", () => {
+    open();
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Redo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+  });
+
+  it("undoes and redoes a change", () => {
+    open();
+    const label = screen.getByLabelText("Label of node 1") as HTMLInputElement;
+    fireEvent.change(label, { target: { value: "Renamed" } });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect((screen.getByLabelText("Label of node 1") as HTMLInputElement).value).toBe("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Redo" }));
+    expect((screen.getByLabelText("Label of node 1") as HTMLInputElement).value).toBe("Renamed");
+  });
+
+  it("leaves at once when nothing changed", () => {
+    const onCancel = vi.fn();
+    open({ onCancel });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before dropping unsaved changes", () => {
+    const onCancel = vi.fn();
+    open({ onCancel });
+    fireEvent.change(screen.getByLabelText("Label of node 1"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Discard and leave" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("splices a node into an edge, keeping both ends", () => {
+    const onSave = vi.fn();
+    open({ onSave });
+    fireEvent.click(screen.getByRole("button", { name: "Insert a node between a and b" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saved = onSave.mock.calls[0]![0] as {
+      nodes: Array<{ id: string }>;
+      edges: Array<{ from: string; to: string }>;
+    };
+    const added = saved.nodes[2]!.id;
+    expect(saved.edges.map((edge) => `${edge.from}>${edge.to}`)).toEqual([
+      "__start__>a",
+      `a>${added}`,
+      `${added}>b`,
+      "b>__end__",
+    ]);
+  });
+});
+
+describe("GraphEditor > positions", () => {
+  const base = () => ({
+    ...TEMPLATES[0]!,
+    id: "probe",
+    name: "Probe",
+  });
+  const open = (graph: unknown, onSave: () => void = noop) =>
+    editor({
+      graphs: [graph],
+      templates: TEMPLATES,
+      graphId: "probe",
+      pending: false,
+      onSave,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+
+  it("offers Auto layout once nodes were placed, and it forgets the places", () => {
+    const onSave = vi.fn();
+    open({ ...base(), positions: { [TEMPLATES[0]!.nodes[0]!.id]: { x: 10, y: 20 } } }, onSave);
+    fireEvent.click(screen.getByRole("button", { name: "Auto layout" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSave.mock.calls[0]![0].positions).toEqual({});
+  });
+
+  it("offers no Auto layout while the layout is computed anyway", () => {
+    open({ ...base(), positions: {} });
+    expect(screen.queryByRole("button", { name: "Auto layout" })).toBeNull();
   });
 });

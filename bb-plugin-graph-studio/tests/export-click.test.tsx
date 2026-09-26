@@ -118,3 +118,24 @@ describe("export button", () => {
     );
   });
 });
+
+/**
+ * Editing an existing graph opens in full screen — the graph needs the room.
+ * A new graph does not: its template picker and id live in the panel.
+ */
+describe("editor perspective", () => {
+  const layer = () => document.body.querySelector('[role="dialog"][aria-label$="full screen"]');
+
+  it("opens an existing graph straight into full screen", async () => {
+    const slot = panel();
+    fireEvent.click(await slot.findByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(layer()).not.toBeNull());
+  });
+
+  it("starts a new graph in the panel", async () => {
+    const slot = panel();
+    fireEvent.click(await slot.findByRole("button", { name: /^New/ }));
+    await slot.findByLabelText("Graph id");
+    expect(layer()).toBeNull();
+  });
+});

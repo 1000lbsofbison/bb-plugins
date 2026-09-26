@@ -2,7 +2,7 @@
 //
 // Panel wiring through the SDK's own slot harness, so the RPC calls the UI
 // makes are the ones the server actually declares.
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   loadPluginApp,
@@ -158,25 +158,35 @@ describe("Full screen", () => {
     return slot;
   };
 
-  it("hides the explanatory chrome once focused", async () => {
+  // The layer covers the whole window, portaled to the body — the old mode
+  // only filled the panel's column, which was a reset rather than a mode.
+  const layer = () => screen.queryByRole("dialog", { name: /full screen/ });
+
+  it("opens over the whole window, with the details in a sidebar", async () => {
     const slot = await openRun(makeRun());
-    expect(
-      await slot.findByText(/Click a node to see its prompt/),
-    ).toBeTruthy();
+    expect(layer()).toBeNull();
 
     fireEvent.click(slot.getByRole("button", { name: "Full screen" }));
 
-    await waitFor(() => {
-      expect(slot.queryByText(/Click a node to see its prompt/)).toBeNull();
+    const opened = await waitFor(() => {
+      const found = layer();
+      expect(found).not.toBeNull();
+      return found!;
     });
-    expect(slot.getByRole("button", { name: /Leave full screen/ })).toBeTruthy();
+    expect(opened.parentElement).toBe(document.body);
+    expect(
+      within(opened).getByText(/Click a node to see its prompt/),
+    ).toBeTruthy();
+    expect(within(opened).getByRole("button", { name: /Leave full screen/ })).toBeTruthy();
+    // The inline view steps aside rather than rendering a second canvas.
+    expect(slot.queryByRole("button", { name: "Full screen" })).toBeNull();
   });
 
   // The one rule the mode lives or dies by. A waiting node looks much like a
   // working one on the canvas, so hiding the question would leave a run
   // stopped with nothing anywhere saying why — this project's recurring bug,
   // rebuilt as a feature.
-  it("keeps a pending question visible in focus mode", async () => {
+  it("keeps a pending question visible in full screen", async () => {
     const slot = await openRun(
       makeRun({
         status: "waiting-human",
@@ -189,11 +199,13 @@ describe("Full screen", () => {
     );
     fireEvent.click(slot.getByRole("button", { name: "Full screen" }));
 
-    await waitFor(() => {
-      expect(slot.queryByText(/Click a node to see its prompt/)).toBeNull();
+    const opened = await waitFor(() => {
+      const found = layer();
+      expect(found).not.toBeNull();
+      return found!;
     });
-    expect(slot.getByText("Does the concept hold?")).toBeTruthy();
-    expect(slot.getByLabelText("Answer to the approval")).toBeTruthy();
+    expect(within(opened).getByText("Does the concept hold?")).toBeTruthy();
+    expect(within(opened).getByLabelText("Answer to the approval")).toBeTruthy();
   });
 
   // The question is usually Markdown; as plain text a table is a wall of pipes.
@@ -240,12 +252,11 @@ describe("Full screen", () => {
   it("comes back with Escape", async () => {
     const slot = await openRun(makeRun());
     fireEvent.click(slot.getByRole("button", { name: "Full screen" }));
-    await waitFor(() => {
-      expect(slot.queryByText(/Click a node to see its prompt/)).toBeNull();
-    });
+    await waitFor(() => expect(layer()).not.toBeNull());
 
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await slot.findByText(/Click a node to see its prompt/)).toBeTruthy();
+    await waitFor(() => expect(layer()).toBeNull());
+    expect(await slot.findByRole("button", { name: "Full screen" })).toBeTruthy();
   });
 });
 

@@ -378,6 +378,15 @@ export const graphSchema = z.object({
    * run: a truncated review is worth more than none.
    */
   maxFanOut: z.number().int().min(1).max(50).default(12),
+  /**
+   * Where the author placed each node on the canvas, by node id (Start and
+   * End included). Optional per node: an id without an entry is placed by the
+   * computed layout, so a graph written by an agent or an old file needs none,
+   * and "Auto layout" is simply clearing this.
+   */
+  positions: z
+    .record(z.string(), z.object({ x: z.number(), y: z.number() }))
+    .default({}),
   createdAt: z.number().default(0),
   updatedAt: z.number().default(0),
 });
@@ -497,7 +506,10 @@ export function validateGraph(
     ) {
       problems.push({
         level: "error",
-        message: `"${node.label}" mixes conditional and several unconditional edges; keep at most one unconditional edge as the fallback.`,
+        message: `"${node.label}" mixes conditional and several unconditional edges (${out
+          .filter((edge) => edge.when === null)
+          .map((edge) => `→ ${edge.to === END_NODE ? "End" : edge.to}`)
+          .join(", ")}); keep at most one unconditional edge as the fallback.`,
       });
     }
     if (node.routing === "every" && out.length < 2) {

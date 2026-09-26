@@ -1,9 +1,12 @@
-// Form-based graph editor with a live preview.
+// Graph editor: the graph itself is the entry point.
 //
-// Deliberately not a drag-and-drop canvas: the layout is computed, so the only
-// thing worth editing is the structure. Every change re-lays out and re-checks
-// immediately, which is what makes a cyclic graph safe to author by hand.
-import { useMemo, useState } from "react";
+// A node is clicked on the canvas, and a card opens with everything about it —
+// its settings and the edges coming in and going out. Edges can also be drawn
+// by dragging between nodes. Positions are still not dragged: the layout is
+// computed, so the only thing worth editing is the structure. Every change
+// re-lays out and re-checks immediately, which is what makes a cyclic graph
+// safe to author by hand.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   // Aliased because JSX reads a lowercase tag as an intrinsic element.
   experimental_ProviderModelPicker as ProviderModelPicker,
@@ -13,6 +16,7 @@ import {
   CONDITION_OPS,
   END_NODE,
   FIELD_TYPES,
+  KIND_LABEL,
   NODE_KINDS,
   ROUTING_MODES,
   START_NODE,
@@ -30,14 +34,24 @@ import {
   type GraphNode,
 } from "../lib/graph";
 import { runCommand } from "../lib/describe";
+import { edgeLabel } from "../lib/layout";
 import { groupedLibrary } from "../lib/templates";
 import { GraphCanvas, CanvasLegend } from "./graph-canvas";
 import { CopyCommand } from "./copy-command";
+import { FullscreenLayer } from "./fullscreen";
 import { ExportedFileView, type ExportedFile } from "./exported-file";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon, type IconName } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+const KIND_ICONS: Record<(typeof NODE_KINDS)[number], IconName> = {
+  agent: "Bot",
+  dialog: "MessageQuestion",
+  human: "CircleCheck",
+  note: "Edit",
+  subgraph: "Workflow",
+};
 
 const KIND_LABELS: Record<(typeof NODE_KINDS)[number], string> = {
   agent: "Agent (own thread)",
@@ -153,6 +167,7 @@ function emptyGraph(): Graph {
     edges: [newEdge(START_NODE, "step1"), newEdge("step1", END_NODE)],
     maxSteps: 60,
     maxFanOut: 12,
+    positions: {},
     createdAt: 0,
     updatedAt: 0,
   };
@@ -176,17 +191,169 @@ function NodeExecutionSection({
   node,
   index,
   onPatch,
+  defaultOpen = false,
+  only,
 }: {
   node: GraphNode;
   index: number;
   onPatch: (patch: Partial<GraphNode>) => void;
+  /** Unfolded from the start. */
+  defaultOpen?: boolean;
+  /**
+   * One half only, for the inspector: the model is what a review looks at
+   * first, the guards are tuning. Without it, both in one folded section.
+   */
+  only?: "model" | "limits";
 }) {
   const providers = experimental_useProviders();
   const execution = nodeExecution(node);
   const explicit = node.providerId !== null || node.model !== null;
 
   return (
-    <details className="rounded-md border border-border">
+    only === "model" ? (
+      <div className="space-y-2">
+        {spawnsThread(node) ? (
+          <div className="space-y-1">
+            <span className="block text-[11px] text-muted-foreground">
+              Model — with no choice of its own, the worker runs on the model
+              of the thread the run belongs to.
+            </span>
+            <select
+              value={explicit ? "explicit" : "inherit"}
+              onChange={(event) => {
+                if (event.target.value === "inherit") {
+                  onPatch({
+                    providerId: null,
+                    model: null,
+                    reasoningLevel: null,
+                    serviceTier: null,
+                  });
+                  return;
+                }
+                // Seeding only the provider leaves the node incomplete, and
+                // validation says so in as many words. That is better than
+                // inventing a model id the catalog may not have: a wrong one
+                // would be found only when a worker fails to start.
+                onPatch({
+                  providerId: providers.providers[0]?.id ?? "",
+                  model: "",
+                });
+              }}
+              aria-label={`Model choice of node ${index + 1}`}
+              className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+            >
+              <option value="inherit">Inherit from the parent thread</option>
+              <option value="explicit">Set for this node</option>
+            </select>
+            {explicit ? (
+              <ProviderModelPicker
+                value={{
+                  providerId: node.providerId ?? "",
+                  model: node.model ?? "",
+                  reasoningLevel: node.reasoningLevel ?? "medium",
+                  ...(node.serviceTier ? { serviceTier: node.serviceTier } : {}),
+                }}
+                onChange={(value) =>
+                  onPatch({
+                    providerId: value.providerId,
+                    model: value.model,
+                    reasoningLevel: value.reasoningLevel,
+                    serviceTier: value.serviceTier ?? null,
+                  })
+                }
+              />
+            ) : null}
+            {explicit && !execution ? (
+              <p className="text-[11px] text-destructive">
+                Provider and model belong together — set halfway, the choice
+                is discarded and the node would run on the inherited model.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    ) : only === "limits" ? (
+      <div className="space-y-2">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="space-y-1">
+            <span className="text-[11px] text-muted-foreground">
+              At most N visits
+            </span>
+            <Input
+              type="number"
+              min={1}
+              max={50}
+              value={node.maxVisits}
+              onChange={(event) =>
+                onPatch({
+                  maxVisits: Number.parseInt(event.target.value, 10) || 1,
+                })
+              }
+              aria-label={`Visit limit of node ${index + 1}`}
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[11px] text-muted-foreground">
+              Attempts per visit
+            </span>
+            <Input
+              type="number"
+              min={1}
+              max={5}
+              value={node.maxAttempts}
+              onChange={(event) =>
+                onPatch({
+                  maxAttempts: Number.parseInt(event.target.value, 10) || 1,
+                })
+              }
+              aria-label={`Attempts of node ${index + 1}`}
+            />
+          </label>
+          {node.kind === "dialog" ? (
+            <label className="space-y-1">
+              <span className="text-[11px] text-muted-foreground">
+                Questions before wrapping up
+              </span>
+              <Input
+                type="number"
+                min={1}
+                max={50}
+                value={node.maxTurns}
+                onChange={(event) =>
+                  onPatch({
+                    maxTurns: Number.parseInt(event.target.value, 10) || 1,
+                  })
+                }
+                aria-label={`Questions of node ${index + 1}`}
+              />
+            </label>
+          ) : null}
+        </div>
+
+        {node.kind === "agent" || node.kind === "dialog" ? (
+          <label className="space-y-1">
+            <span className="block text-[11px] text-muted-foreground">
+              When the attempts are used up
+            </span>
+            <select
+              value={node.onError}
+              onChange={(event) =>
+                onPatch({ onError: event.target.value as GraphNode["onError"] })
+              }
+              aria-label={`Failure handling of node ${index + 1}`}
+              className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+            >
+              <option value="stop">End the run</option>
+              <option value="route">
+                Carry on — an edge decides, using "failed"
+              </option>
+            </select>
+          </label>
+        ) : null}
+
+      </div>
+    ) : (
+    <details className="rounded-md border border-border" open={defaultOpen || undefined}>
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 text-[11px] text-muted-foreground">
         <Icon name="Settings" className="size-3.5" />
         Execution
@@ -331,6 +498,7 @@ function NodeExecutionSection({
         ) : null}
       </div>
     </details>
+    )
   );
 }
 
@@ -376,6 +544,8 @@ export function GraphEditor({
   exported = null,
   exporting = false,
   onDismissExport,
+  startFullscreen = false,
+  onOpenGraph,
 }: {
   graphs: Graph[];
   templates: Graph[];
@@ -392,12 +562,114 @@ export function GraphEditor({
   exported?: ExportedFile | null;
   exporting?: boolean;
   onDismissExport?: () => void;
+  /**
+   * Open straight into full screen. The panel asks for it when an existing
+   * graph is edited: editing is work on the graph, and the graph needs the
+   * room. A new graph starts in the panel, where the template picker is.
+   */
+  startFullscreen?: boolean;
+  /** Opens another graph of the library in the editor — an imported one. */
+  onOpenGraph?: (id: string) => void;
 }) {
   const existing = graphId ? graphs.find((entry) => entry.id === graphId) : null;
-  const [draft, setDraft] = useState<Graph>(existing ?? emptyGraph());
+  /**
+   * The draft with its history, in one state so undo and the change it undoes
+   * can never be half applied. Keystrokes within a moment of each other count
+   * as one step — undoing a label letter by letter is not undo, it is typing
+   * backwards.
+   */
+  const [history, setHistory] = useState<{
+    draft: Graph;
+    past: Graph[];
+    future: Graph[];
+  }>(() => ({ draft: existing ?? emptyGraph(), past: [], future: [] }));
+  const draft = history.draft;
+  const lastChange = useRef(0);
+  const setDraft = useCallback((next: Graph | ((current: Graph) => Graph)) => {
+    const now = Date.now();
+    const push = now - lastChange.current > 600;
+    lastChange.current = now;
+    setHistory((state) => {
+      const value = typeof next === "function" ? next(state.draft) : next;
+      if (value === state.draft) return state;
+      return {
+        draft: value,
+        past: push ? [...state.past.slice(-99), state.draft] : state.past,
+        future: [],
+      };
+    });
+  }, []);
+  const undo = useCallback(() => {
+    lastChange.current = 0;
+    setHistory((state) =>
+      state.past.length === 0
+        ? state
+        : {
+            draft: state.past[state.past.length - 1]!,
+            past: state.past.slice(0, -1),
+            future: [state.draft, ...state.future],
+          },
+    );
+  }, []);
+  const redo = useCallback(() => {
+    lastChange.current = 0;
+    setHistory((state) =>
+      state.future.length === 0
+        ? state
+        : {
+            draft: state.future[0]!,
+            past: [...state.past, state.draft],
+            future: state.future.slice(1),
+          },
+    );
+  }, []);
+  /** What was loaded, to tell a changed draft from an untouched one. */
+  const [baseline] = useState(() => JSON.stringify(existing ?? emptyGraph()));
+  const dirty = JSON.stringify(draft) !== baseline;
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const leave = () => (dirty ? setConfirmLeave(true) : onCancel());
+
+  // Undo outside text fields only: inside one, the browser's own undo for
+  // that field is what the keystroke means.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
   const [cloneFrom, setCloneFrom] = useState(templates[0]?.id ?? "");
   const [cloneId, setCloneId] = useState("");
   const [importText, setImportText] = useState("");
+  /**
+   * Whose card is open: a node by position, or one of the two terminals. The
+   * first node starts open, so the editor never opens on a blank card beside
+   * a graph that is already there.
+   */
+  const [fullscreen, setFullscreen] = useState(startFullscreen);
+  /** Which edge rows are unfolded, by edge index. */
+  const [openEdges, setOpenEdges] = useState<Set<number>>(() => new Set());
+  // Stable, so the layer's Escape listener is not re-bound on every keystroke.
+  const closeFullscreen = useCallback(() => setFullscreen(false), []);
+  const [selection, setSelection] = useState<number | "start" | "end" | null>(
+    (existing ?? draft).nodes.length > 0 ? 0 : null,
+  );
 
   /**
    * Subgraph nodes are validated against the library the editor already holds,
@@ -445,12 +717,45 @@ export function GraphEditor({
   const sources = [START_NODE, ...nodeIds];
 
   const patchNode = (index: number, patch: Partial<GraphNode>) =>
-    setDraft((current) => ({
-      ...current,
-      nodes: current.nodes.map((node, i) =>
-        i === index ? { ...node, ...patch } : node,
-      ),
-    }));
+    setDraft((current) => {
+      const previous = current.nodes[index];
+      // A renamed node takes its edges along. Without this, typing a new id
+      // left every edge pointing at the old one — and with the edges now
+      // shown inside the node's card, they would silently drop out of it.
+      // Not when the new id belongs to another node: that is a typo on the
+      // way somewhere else, and merging two nodes' edges could not be undone.
+      // Nor while the old id is shared: the edges then belong to the other
+      // node just as much, and the next keystroke would carry them off.
+      const taken = (id: string) =>
+        current.nodes.some((node, i) => i !== index && node.id === id);
+      const renamed =
+        previous !== undefined &&
+        patch.id !== undefined &&
+        patch.id !== previous.id &&
+        !taken(patch.id) &&
+        !taken(previous.id);
+      const rename = (id: string) =>
+        renamed && id === previous!.id ? patch.id! : id;
+      return {
+        ...current,
+        nodes: current.nodes.map((node, i) =>
+          i === index ? { ...node, ...patch } : node,
+        ),
+        edges: renamed
+          ? current.edges.map((edge) => ({
+              ...edge,
+              from: rename(edge.from),
+              to: rename(edge.to),
+            }))
+          : current.edges,
+        positions:
+          renamed && current.positions?.[previous!.id]
+            ? Object.fromEntries(
+                Object.entries(current.positions).map(([id, at]) => [rename(id), at]),
+              )
+            : current.positions,
+      };
+    });
 
   const patchEdge = (index: number, patch: Partial<GraphEdge>) =>
     setDraft((current) => ({
@@ -460,552 +765,175 @@ export function GraphEditor({
       ),
     }));
 
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <Button size="sm" variant="ghost" className="-ml-2 h-6 px-2" onClick={onCancel}>
-          <Icon name="ChevronLeft" className="size-4" />
-          Overview
-        </Button>
-        <div className="flex gap-2">
-          {existing ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-destructive"
-              onClick={() => onDelete(existing.id)}
-            >
-              Delete
-            </Button>
-          ) : null}
-          <Button
-            size="sm"
-            disabled={pending || blocking.length > 0 || draft.id === ""}
-            onClick={() => onSave(graphSchema.parse(draft))}
-          >
-            Save
-          </Button>
-        </div>
-      </div>
+  const addEdge = (from: string, to: string) => {
+    setDraft((current) => ({
+      ...current,
+      edges: [...current.edges, newEdge(from, to)],
+    }));
+    // A new edge opens straight away: its target and condition are what the
+    // author is about to set.
+    setOpenEdges((current) => new Set(current).add(draft.edges.length));
+  };
 
-      {!existing ? (
-        <div className="rounded-lg border border-border bg-card px-3 py-3">
-          <p className="text-sm font-medium">Start from a template</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Quicker than starting from nothing. The <em>Patterns</em> headings
-            run from the simplest control flow to the most composed — one step,
-            one branch, several at once, cycles; under <em>Work</em> the arcs
-            for this repo.
-          </p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <select
-              value={cloneFrom}
-              onChange={(event) => setCloneFrom(event.target.value)}
-              className="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
-            >
-              {groupedLibrary(templates, "section").map((section) => (
-                <optgroup key={section.key} label={section.label}>
-                  {section.graphs.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <Input
-              value={cloneId}
-              onChange={(event) => setCloneId(event.target.value)}
-              placeholder="new-id"
-              aria-label="Id of the new graph"
-              className="h-8 flex-1"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending || cloneId.trim() === ""}
-              onClick={() => {
-                const template = templates.find((entry) => entry.id === cloneFrom);
-                onClone(cloneFrom, cloneId.trim(), template?.name ?? cloneId);
+  /**
+   * A node spliced into an edge: the edge keeps its condition and now ends at
+   * the new node, which carries on to the old target unconditionally.
+   */
+  const insertOnEdge = (from: string, to: string) => {
+    const at = draft.edges.findIndex((edge) => edge.from === from && edge.to === to);
+    if (at < 0) return;
+    let n = draft.nodes.length + 1;
+    while (draft.nodes.some((node) => node.id === `step${n}`)) n += 1;
+    const id = `step${n}`;
+    setDraft((current) => ({
+      ...current,
+      nodes: [...current.nodes, newNode(id, `Step ${n}`)],
+      edges: [
+        ...current.edges.slice(0, at),
+        { ...current.edges[at]!, to: id },
+        newEdge(id, to),
+        ...current.edges.slice(at + 1),
+      ],
+    }));
+    setOpenEdges(new Set());
+    setSelection(draft.nodes.length);
+  };
+
+  const addNode = () => {
+    setDraft((current) => ({
+      ...current,
+      nodes: [
+        ...current.nodes,
+        newNode(
+          `step${current.nodes.length + 1}`,
+          `Step ${current.nodes.length + 1}`,
+        ),
+      ],
+    }));
+    // Straight into the new node's card: adding one is the first half of
+    // editing it.
+    setSelection(draft.nodes.length);
+  };
+
+  /**
+   * The card follows the node by position rather than by id, because the id
+   * is one of the things being edited in it — selecting by id would close the
+   * card on the first keystroke of a rename.
+   */
+  const selectedIndex =
+    typeof selection === "number" && selection < draft.nodes.length
+      ? selection
+      : null;
+  const canvasSelection =
+    selection === "start"
+      ? START_NODE
+      : selection === "end"
+        ? END_NODE
+        : selectedIndex !== null
+          ? draft.nodes[selectedIndex]!.id
+          : null;
+
+  const selectById = (id: string | null) => {
+    if (id === null) return setSelection(null);
+    if (id === START_NODE) return setSelection("start");
+    if (id === END_NODE) return setSelection("end");
+    const index = draft.nodes.findIndex((node) => node.id === id);
+    setSelection(index >= 0 ? index : null);
+  };
+
+  /** Edges with their position in the graph, which is what their labels count. */
+  const indexedEdges = draft.edges.map((edge, index) => ({ edge, index }));
+  const outgoing = (id: string) =>
+    indexedEdges.filter(({ edge }) => edge.from === id);
+  // A self-loop is listed once, under outgoing: twice would put two identical
+  // sets of controls on the card for one edge.
+  const incoming = (id: string) =>
+    indexedEdges.filter(({ edge }) => edge.to === id && edge.from !== id);
+  /**
+   * Edges that belong in no card: an end names no node there is. Validation
+   * already reports them, but an edge nobody can reach to fix is worse than
+   * the error, so they keep a list of their own.
+   */
+  const strayEdges = indexedEdges.filter(
+    ({ edge }) => !sources.includes(edge.from) || !targets.includes(edge.to),
+  );
+
+  /** What a node is called in a sentence: its label, or Start/End. */
+  const nameOf = (id: string) =>
+    id === START_NODE
+      ? "Start"
+      : id === END_NODE
+        ? "End"
+        : (draft.nodes.find((node) => node.id === id)?.label || id);
+
+  /**
+   * One edge as a single line — where it goes and under which condition —
+   * that opens into all its controls. A card listing every edge fully open
+   * was the crowding: three selects and two inputs per edge, times every edge
+   * the node has, before the reader even knew which edge they wanted.
+   */
+  const renderEdge = (
+    edge: GraphEdge,
+    index: number,
+    side: "in" | "out" | "stray" = "stray",
+  ) => {
+    const other = side === "in" ? edge.from : edge.to;
+    const caption = edgeLabel(edge);
+    return (
+      <details
+        key={index}
+        open={openEdges.has(index)}
+        onToggle={(event) => {
+          const isOpen = event.currentTarget.open;
+          setOpenEdges((current) => {
+            if (current.has(index) === isOpen) return current;
+            const next = new Set(current);
+            if (isOpen) next.add(index);
+            else next.delete(index);
+            return next;
+          });
+        }}
+        className="group rounded-md border border-border/60"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-xs">
+          <Icon
+            name="ChevronRight"
+            className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
+          />
+          {side === "stray" ? (
+            <span className="truncate font-medium">
+              {edge.from} → {edge.to}
+            </span>
+          ) : (
+            <>
+              <span className="shrink-0 text-muted-foreground">
+                {side === "in" ? "from" : "to"}
+              </span>
+              <span className="truncate font-medium">{nameOf(other)}</span>
+            </>
+          )}
+          {caption ? (
+            <span className="min-w-0 truncate text-muted-foreground">· {caption}</span>
+          ) : (
+            <span className="shrink-0 text-muted-foreground">· always</span>
+          )}
+          {side !== "stray" && targets.concat(sources).includes(other) ? (
+            <button
+              type="button"
+              className="ml-auto shrink-0 rounded-sm p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={(event) => {
+                // Inside <summary>: without this the click also folds the row.
+                event.preventDefault();
+                selectById(other);
               }}
+              aria-label={`Go to ${nameOf(other)}`}
+              title={`Go to ${nameOf(other)}`}
             >
-              Copy
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="grid gap-2 sm:grid-cols-2">
-        <label className="space-y-1">
-          <span className="text-[11px] text-muted-foreground">Id (fixed)</span>
-          <Input
-            value={draft.id}
-            disabled={Boolean(existing)}
-            onChange={(event) =>
-              setDraft({ ...draft, id: event.target.value.toLowerCase() })
-            }
-            placeholder="my-graph"
-            aria-label="Graph id"
-          />
-        </label>
-        <label className="space-y-1">
-          <span className="text-[11px] text-muted-foreground">Name</span>
-          <Input
-            value={draft.name}
-            onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-            aria-label="Graph name"
-          />
-        </label>
-      </div>
-
-      {/*
-        The name says what the graph is, the example says what you put into it
-        — and only the second one tells a reader six weeks later whether this
-        is the graph for the task in front of them. It is also what the
-        ready-made command line below offers.
-      */}
-      <label className="block space-y-1">
-        <span className="text-[11px] text-muted-foreground">
-          Example task — what is this graph for?
-        </span>
-        <Input
-          value={draft.example}
-          onChange={(event) => setDraft({ ...draft, example: event.target.value })}
-          placeholder="Move the product filter's sorting to the server side"
-          aria-label="Example task"
-        />
-        <CopyCommand command={runCommand(draft)} />
-      </label>
-
-      {/*
-        Caption and legend share one row. They used to take a line each, above
-        and below the canvas — three rows of chrome around the one thing worth
-        looking at, in a panel where vertical space is the scarce resource.
-        The legend keeps its meaning next to the caption; it explains the
-        drawing either way.
-      */}
-      <div className="space-y-1.5">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Preview
-          </p>
-          <CanvasLegend />
-        </div>
-        <GraphCanvas graph={draft} className="max-h-[55vh]" />
-      </div>
-
-      {problems.length > 0 ? (
-        <ul className="space-y-1">
-          {problems.map((problem) => (
-            <li
-              key={problem.message}
-              className={cn(
-                "flex items-start gap-1.5 text-xs",
-                problem.level === "error"
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-            >
-              <Icon
-                name={problem.level === "error" ? "AlertTriangle" : "Info"}
-                className="mt-px size-3.5 shrink-0"
-              />
-              {problem.message}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Icon name="Check" className="size-3.5" />
-          The graph is runnable.
-        </p>
-      )}
-
-      {/* nodes */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Nodes
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 px-2"
-            onClick={() =>
-              setDraft({
-                ...draft,
-                nodes: [
-                  ...draft.nodes,
-                  newNode(
-                    `step${draft.nodes.length + 1}`,
-                    `Step ${draft.nodes.length + 1}`,
-                  ),
-                ],
-              })
-            }
-          >
-            <Icon name="Plus" className="size-3.5" />
-            Node
-          </Button>
-        </div>
-        {draft.nodes.map((node, index) => (
-          <details key={index} className="rounded-lg border border-border bg-card">
-            <summary className="cursor-pointer list-none px-3 py-2 text-sm">
-              {node.label}{" "}
-              <span className="text-muted-foreground">({node.id})</span>
-              {nodeExecution(node) ? (
-                <span className="ml-1 rounded-sm bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  {nodeExecution(node)?.model}
-                </span>
-              ) : null}
-            </summary>
-            <div className="space-y-2 border-t border-border px-3 py-2">
-              <div className="grid gap-2 sm:grid-cols-2">
-                <label className="space-y-1">
-                  <span className="text-[11px] text-muted-foreground">Id</span>
-                  <Input
-                    value={node.id}
-                    onChange={(event) =>
-                      patchNode(index, { id: event.target.value.toLowerCase() })
-                    }
-                    aria-label={`Id of node ${index + 1}`}
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[11px] text-muted-foreground">Label</span>
-                  <Input
-                    value={node.label}
-                    onChange={(event) => patchNode(index, { label: event.target.value })}
-                    aria-label={`Label of node ${index + 1}`}
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[11px] text-muted-foreground">Kind</span>
-                  <select
-                    value={node.kind}
-                    onChange={(event) =>
-                      patchNode(index, { kind: event.target.value as GraphNode["kind"] })
-                    }
-                    className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                  >
-                    {NODE_KINDS.map((kind) => (
-                      <option key={kind} value={kind}>
-                        {KIND_LABELS[kind]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {/* Only where there is something to choose between. On a node
-                    with one way out the setting changes nothing, and an inert
-                    dropdown on every node teaches that it does not matter. */}
-                {draft.edges.filter((edge) => edge.from === node.id).length > 1 ? (
-                  <label className="space-y-1">
-                    <span className="text-[11px] text-muted-foreground">Takes</span>
-                    <select
-                      value={node.routing}
-                      onChange={(event) =>
-                        patchNode(index, {
-                          routing: event.target.value as GraphNode["routing"],
-                        })
-                      }
-                      aria-label={`Routing of node ${index + 1}`}
-                      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                    >
-                      {ROUTING_MODES.map((mode) => (
-                        <option key={mode} value={mode}>
-                          {ROUTING_LABELS[mode]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-              </div>
-              {draft.edges.filter((edge) => edge.from === node.id).length > 1 &&
-              node.routing === "every" ? (
-                <p className="text-[11px] text-muted-foreground">
-                  Every edge whose condition holds is taken, and those branches
-                  run at once. They cannot be merged again afterwards: a branch
-                  that was not taken never arrives, so a node waiting for it
-                  would wait forever.
-                </p>
-              ) : null}
-              <label
-                className={cn(
-                  "block space-y-1",
-                  // A subgraph node hands no prompt to anybody; showing the
-                  // field would invite writing an instruction that reaches
-                  // nobody.
-                  node.kind === "subgraph" && "hidden",
-                )}
-              >
-                <span className="text-[11px] text-muted-foreground">
-                  Prompt — {"{{input}}"} and {"{{node_id}}"} are filled in
-                </span>
-                <textarea
-                  value={node.prompt}
-                  onChange={(event) => patchNode(index, { prompt: event.target.value })}
-                  rows={4}
-                  className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 text-xs"
-                  aria-label={`Prompt of node ${index + 1}`}
-                />
-              </label>
-              {node.kind === "subgraph" ? (
-                <label className="block space-y-1">
-                  <span className="text-[11px] text-muted-foreground">
-                    Embedded graph — its nodes run as part of this run and
-                    share the state. A later node reads their results as{" "}
-                    {"{{node_id}}"}.
-                  </span>
-                  <select
-                    value={node.graphId}
-                    onChange={(event) =>
-                      patchNode(index, { graphId: event.target.value })
-                    }
-                    aria-label={`Embedded graph of node ${index + 1}`}
-                    className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                  >
-                    <option value="">Choose a graph …</option>
-                    {groupedLibrary(
-                      // The graph cannot embed itself, so it is not offered.
-                      [...templates, ...graphs].filter(
-                        (entry) => entry.id !== draft.id,
-                      ),
-                    ).map((section) => (
-                      <optgroup key={section.key} label={section.label}>
-                        {section.graphs.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.name} ({entry.nodes.length} nodes)
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              {node.kind === "agent" || node.kind === "dialog" ? (
-                <div className="space-y-1">
-                  <span className="text-[11px] text-muted-foreground">
-                    Skills — reviewed ways of working, instead of writing the
-                    rules out yourself. The worker loads them itself.
-                  </span>
-                  {node.skills.length > 0 ? (
-                    <ul className="flex flex-wrap gap-1">
-                      {node.skills.map((skill) => (
-                        <li key={skill}>
-                          <button
-                            type="button"
-                            className="inline-flex items-center gap-1 rounded-sm bg-muted px-1.5 py-0.5 text-[11px]"
-                            onClick={() =>
-                              patchNode(index, {
-                                skills: node.skills.filter((s) => s !== skill),
-                              })
-                            }
-                            aria-label={`Remove skill ${skill}`}
-                          >
-                            {skill}
-                            <Icon name="X" className="size-3" />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {availableSkills.length > 0 ? (
-                    <select
-                      value=""
-                      onChange={(event) => {
-                        const id = event.target.value;
-                        if (!id || node.skills.includes(id)) return;
-                        patchNode(index, { skills: [...node.skills, id] });
-                      }}
-                      aria-label={`Add a skill to node ${index + 1}`}
-                      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                    >
-                      <option value="">Add a skill …</option>
-                      {availableSkills
-                        .filter((skill) => !node.skills.includes(skill.id))
-                        .map((skill) => (
-                          <option key={skill.id} value={skill.id}>
-                            {skill.name} ({skill.scope})
-                          </option>
-                        ))}
-                    </select>
-                  ) : (
-                    <p className="text-[11px] text-muted-foreground">
-                      {skillsError
-                        ? `Skills unavailable: ${skillsError}`
-                        : "No skills found."}
-                    </p>
-                  )}
-                </div>
-              ) : null}
-              {node.kind === "agent" ? (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-muted-foreground">
-                      Result fields — the worker additionally answers as JSON.
-                      Edges then compare values instead of searching text.
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-6 shrink-0 px-2"
-                      onClick={() =>
-                        patchNode(index, {
-                          fields: [
-                            ...node.fields,
-                            fieldSchema.parse({
-                              name: `field${node.fields.length + 1}`,
-                            }),
-                          ],
-                        })
-                      }
-                    >
-                      <Icon name="Plus" className="size-3.5" />
-                      Field
-                    </Button>
-                  </div>
-                  {node.fields.map((declared, fieldIndex) => {
-                    const patchField = (patch: Partial<typeof declared>) =>
-                      patchNode(index, {
-                        fields: node.fields.map((entry, i) =>
-                          i === fieldIndex ? { ...entry, ...patch } : entry,
-                        ),
-                      });
-                    return (
-                      <div
-                        key={fieldIndex}
-                        className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1.5"
-                      >
-                        <Input
-                          value={declared.name}
-                          onChange={(event) =>
-                            patchField({ name: event.target.value.toLowerCase() })
-                          }
-                          aria-label={`Name of field ${fieldIndex + 1} in node ${index + 1}`}
-                          className="h-7 w-32"
-                        />
-                        <select
-                          value={declared.type}
-                          onChange={(event) =>
-                            patchField({
-                              type: event.target
-                                .value as (typeof FIELD_TYPES)[number],
-                            })
-                          }
-                          aria-label={`Type of field ${fieldIndex + 1} in node ${index + 1}`}
-                          className="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
-                        >
-                          {FIELD_TYPES.map((type) => (
-                            <option key={type} value={type}>
-                              {FIELD_TYPE_LABELS[type]}
-                            </option>
-                          ))}
-                        </select>
-                        {declared.type === "enum" ? (
-                          <Input
-                            value={declared.options.join(", ")}
-                            onChange={(event) =>
-                              patchField({
-                                options: event.target.value
-                                  .split(",")
-                                  .map((option) => option.trim())
-                                  .filter(Boolean),
-                              })
-                            }
-                            placeholder="APPROVE, REWORK, BLOCK"
-                            aria-label={`Choices of field ${fieldIndex + 1} in node ${index + 1}`}
-                            className="h-7 flex-1"
-                          />
-                        ) : (
-                          <Input
-                            value={declared.description}
-                            onChange={(event) =>
-                              patchField({ description: event.target.value })
-                            }
-                            placeholder="Description (optional)"
-                            aria-label={`Description of field ${fieldIndex + 1} in node ${index + 1}`}
-                            className="h-7 flex-1"
-                          />
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 px-2 text-destructive"
-                          onClick={() =>
-                            patchNode(index, {
-                              fields: node.fields.filter(
-                                (_, i) => i !== fieldIndex,
-                              ),
-                            })
-                          }
-                          aria-label={`Remove field ${fieldIndex + 1} in node ${index + 1}`}
-                        >
-                          <Icon name="Trash2" className="size-3.5" />
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
-              <NodeExecutionSection
-                node={node}
-                index={index}
-                onPatch={(patch) => patchNode(index, patch)}
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-6 px-2 text-destructive"
-                onClick={() =>
-                  setDraft({
-                    ...draft,
-                    nodes: draft.nodes.filter((_, i) => i !== index),
-                    edges: draft.edges.filter(
-                      (edge) => edge.from !== node.id && edge.to !== node.id,
-                    ),
-                  })
-                }
-              >
-                Remove node
-              </Button>
-            </div>
-          </details>
-        ))}
-      </div>
-
-      {/* edges */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Edges
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 px-2"
-            onClick={() =>
-              setDraft({
-                ...draft,
-                edges: [...draft.edges, newEdge(nodeIds[0] ?? START_NODE, END_NODE)],
-              })
-            }
-          >
-            <Icon name="Plus" className="size-3.5" />
-            Edge
-          </Button>
-        </div>
-        <p className="text-[11px] text-muted-foreground">
-          Several unconditional edges from one node run in parallel. With
-          conditions, the first matching one wins — an unconditional edge at the
-          bottom serves as the fallback. An edge back upwards makes a cycle.
-          Compare a result field rather than raw text where you can: prose
-          contains the words you are looking for all too casually.
-        </p>
-        {draft.edges.map((edge, index) => (
-          <div
-            key={index}
-            className="space-y-2 rounded-lg border border-border bg-card px-3 py-2"
-          >
+              <Icon name="Target" className="size-3.5" />
+            </button>
+          ) : null}
+        </summary>
+          <div className="space-y-2 border-t border-border px-3 py-2">
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={edge.from}
@@ -1037,10 +965,14 @@ export function GraphEditor({
                 variant="ghost"
                 className="ml-auto h-6 px-2 text-destructive"
                 onClick={() =>
-                  setDraft({
-                    ...draft,
-                    edges: draft.edges.filter((_, i) => i !== index),
-                  })
+                  {
+                    setDraft({
+                      ...draft,
+                      edges: draft.edges.filter((_, i) => i !== index),
+                    });
+                    // Indices behind the removed edge shift by one.
+                    setOpenEdges(new Set());
+                  }
                 }
                 aria-label={`Remove edge ${index + 1}`}
               >
@@ -1242,7 +1174,1150 @@ export function GraphEditor({
               </div>
             ) : null}
           </div>
+      </details>
+    );
+  };
+
+  const edgeGroup = ({
+    title,
+    entries,
+    onAdd,
+    addLabel,
+    hint,
+    side = "stray",
+  }: {
+    title: string;
+    entries: Array<{ edge: GraphEdge; index: number }>;
+    onAdd?: () => void;
+    addLabel?: string;
+    hint?: string;
+    side?: "in" | "out" | "stray";
+  }) => (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          {title}
+        </p>
+        {onAdd ? (
+          <Button size="sm" variant="outline" className="h-6 px-2" onClick={onAdd}>
+            <Icon name="Plus" className="size-3.5" />
+            {addLabel}
+          </Button>
+        ) : null}
+      </div>
+      {hint ? (
+        <details className="text-[11px] text-muted-foreground">
+          <summary className="cursor-pointer list-none underline decoration-dotted underline-offset-2">
+            How edges decide
+          </summary>
+          <p className="mt-1">{hint}</p>
+        </details>
+      ) : null}
+      {entries.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">None.</p>
+      ) : (
+        entries.map(({ edge, index }) => renderEdge(edge, index, side))
+      )}
+    </div>
+  );
+
+  const outgoingHint =
+    "Several unconditional edges from one node run in parallel. With " +
+    "conditions, the first matching one wins — an unconditional edge at the " +
+    "bottom serves as the fallback. An edge back upwards makes a cycle. " +
+    "Compare a result field rather than raw text where you can: prose " +
+    "contains the words you are looking for all too casually.";
+
+  /** The problems that name this node, by label, id or placeholder. */
+  const problemsFor = (node: GraphNode) =>
+    problems.filter(
+      (problem) =>
+        problem.message.includes(`"${node.label}"`) ||
+        problem.message.includes(`"${node.id}"`) ||
+        problem.message.includes(`{{${node.id}}}`),
+    );
+
+  /**
+   * One section of the node inspector: a heading, a one-line summary of what
+   * is set, and the controls. Folded by default — the summaries are the
+   * overview, so the card reads as one list until a section is opened.
+   */
+  const section = (
+    title: string,
+    summary: string,
+    body: React.ReactNode,
+    open = false,
+  ) => (
+    <details open={open || undefined} className="group border-t border-border/60 py-2.5">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px]">
+        <Icon
+          name="ChevronRight"
+          className="size-3 shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
+        />
+        <span className="font-medium uppercase tracking-wide text-muted-foreground">
+          {title}
+        </span>
+        <span className="ml-auto min-w-0 truncate text-muted-foreground">{summary}</span>
+      </summary>
+      <div className="mt-2 space-y-2">{body}</div>
+    </details>
+  );
+
+  const renderNodeCard = (node: GraphNode, index: number) => {
+    const execution = nodeExecution(node);
+    const outCount = outgoing(node.id).length;
+    const inCount = incoming(node.id).length;
+    const worker = node.kind === "agent" || node.kind === "dialog";
+    return (
+    <div className="space-y-1" aria-label={`Node ${node.label}`}>
+      {/* Head: what the node is, in one glance. */}
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          <Icon name={KIND_ICONS[node.kind]} className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{node.label || node.id}</p>
+          <p className="truncate text-[11px] text-muted-foreground">
+            <code>{node.id}</code> · {KIND_LABEL[node.kind]}
+            {node.kind === "subgraph" && resolveGraph(node.graphId)
+              ? ` · imports ${resolveGraph(node.graphId)!.name}`
+              : ""}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 shrink-0 px-2"
+          onClick={() => setSelection(null)}
+          aria-label="Close the card"
+        >
+          <Icon name="X" className="size-3.5" />
+        </Button>
+      </div>
+
+
+      {problemsFor(node).length > 0 ? (
+          // The graph-wide list says what is wrong; here it says so where it
+          // can be fixed.
+          <ul className="space-y-1 rounded-md bg-muted/40 px-2 py-1.5">
+            {problemsFor(node).map((problem) => (
+              <li
+                key={problem.message}
+                className={cn(
+                  "flex items-start gap-1.5 text-[11px]",
+                  problem.level === "error" ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                <Icon
+                  name={problem.level === "error" ? "AlertTriangle" : "Info"}
+                  className="mt-px size-3.5 shrink-0"
+                />
+                {problem.message}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+      {section(
+        "Identity",
+        KIND_LABEL[node.kind],
+        <>
+          <div className="grid gap-2 sm:grid-cols-2">
+                <label className="space-y-1">
+                  <span className="text-[11px] text-muted-foreground">Id</span>
+                  <Input
+                    value={node.id}
+                    onChange={(event) =>
+                      patchNode(index, { id: event.target.value.toLowerCase() })
+                    }
+                    aria-label={`Id of node ${index + 1}`}
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-muted-foreground">Label</span>
+                  <Input
+                    value={node.label}
+                    onChange={(event) => patchNode(index, { label: event.target.value })}
+                    aria-label={`Label of node ${index + 1}`}
+                  />
+                </label>
+          </div>
+                {/* Five kinds as five buttons: an option that is a whole
+                    sentence was the only way to say what each does, and a
+                    select shows one of them at a time. */}
+                <div className="space-y-1 sm:col-span-2">
+                  <span className="text-[11px] text-muted-foreground">Kind</span>
+                  <div
+                    role="radiogroup"
+                    aria-label={`Kind of node ${index + 1}`}
+                    className="grid grid-cols-5 gap-1"
+                  >
+                    {NODE_KINDS.map((kind) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        role="radio"
+                        aria-checked={node.kind === kind}
+                        title={KIND_LABELS[kind]}
+                        onClick={() => patchNode(index, { kind })}
+                        className={cn(
+                          "flex min-w-0 flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 text-[10px]",
+                          node.kind === kind
+                            ? "border-primary bg-primary/10 text-foreground"
+                            : "border-border text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        <Icon name={KIND_ICONS[kind]} className="size-4" />
+                        <span className="truncate">{KIND_LABEL[kind]}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {KIND_LABELS[node.kind]}
+                  </p>
+                </div>
+        </>,
+        false,
+      )}
+
+      {node.kind === "subgraph"
+        ? section(
+            "Import",
+            resolveGraph(node.graphId)?.name ?? "no graph chosen",
+            <>
+              {true ? (
+                <div className="space-y-2">
+                <label className="block space-y-1">
+                  <span className="block rounded-md bg-muted/40 px-2 py-1.5 text-[11px] text-muted-foreground">
+                    <strong className="font-medium text-foreground">
+                      What a subgraph does:
+                    </strong>{" "}
+                    when the run reaches this node, it runs another graph in
+                    its place. That graph's nodes join this run and share its
+                    state; when it reaches its End, the run carries on along
+                    this node's outgoing edges. This node does no work and
+                    writes no result of its own — a later node reads the
+                    results of the embedded nodes by their ids.
+                  </span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Embedded graph
+                  </span>
+                  <select
+                    value={node.graphId}
+                    onChange={(event) =>
+                      patchNode(index, { graphId: event.target.value })
+                    }
+                    aria-label={`Embedded graph of node ${index + 1}`}
+                    className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                  >
+                    <option value="">Choose a graph …</option>
+                    {groupedLibrary(
+                      // The graph cannot embed itself, so it is not offered.
+                      [...templates, ...graphs].filter(
+                        (entry) => entry.id !== draft.id,
+                      ),
+                    ).map((section) => (
+                      <optgroup key={section.key} label={section.label}>
+                        {section.graphs.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name} ({entry.nodes.length} nodes)
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  {(() => {
+                    const child = resolveGraph(node.graphId);
+                    if (!child) return null;
+                    return (
+                      <span className="block text-[11px] text-muted-foreground">
+                        Runs {child.nodes.length} nodes. Later nodes read them
+                        as{" "}
+                        {child.nodes.map((entry, i) => (
+                          <span key={entry.id}>
+                            {i > 0 ? ", " : ""}
+                            <code>{`{{${entry.id}}}`}</code>
+                          </span>
+                        ))}
+                        .
+                      </span>
+                    );
+                  })()}
+                  {/* Left over from the kind the node had before. Hidden
+                      fields that still count are exactly what makes a
+                      warning impossible to fix, so they get a way out. */}
+                  {node.prompt.trim() !== "" || node.fields.length > 0 ? (
+                    <span className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                      Left over from the previous kind:
+                      {node.prompt.trim() !== "" ? " a prompt" : ""}
+                      {node.prompt.trim() !== "" && node.fields.length > 0 ? " and" : ""}
+                      {node.fields.length > 0 ? ` ${node.fields.length} result fields` : ""}
+                      — unused here.
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2"
+                        onClick={() => patchNode(index, { prompt: "", fields: [] })}
+                      >
+                        Clear them
+                      </Button>
+                    </span>
+                  ) : null}
+                </label>
+                {resolveGraph(node.graphId) && onOpenGraph &&
+                graphs.some((entry) => entry.id === node.graphId) ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7"
+                    onClick={() => onOpenGraph(node.graphId)}
+                  >
+                    Edit “{resolveGraph(node.graphId)!.name}”
+                  </Button>
+                ) : null}
+                <p className="text-[11px] text-muted-foreground">
+                  On the canvas, the “+” on this node opens the imported graph
+                  in place.
+                </p>
+                </div>
+              ) : null}
+            </>,
+          )
+        : section(
+            node.kind === "note" ? "Note" : "Task",
+            node.prompt.trim() === "" ? "empty" : `${node.prompt.trim().split("\n")[0]!.slice(0, 48)}`,
+            <>
+              <label
+                className={cn(
+                  "block space-y-1",
+                )}
+              >
+                <span className="text-[11px] text-muted-foreground">
+                  Prompt — {"{{input}}"} and {"{{node_id}}"} are filled in
+                </span>
+                <textarea
+                  value={node.prompt}
+                  onChange={(event) => patchNode(index, { prompt: event.target.value })}
+                  rows={4}
+                  className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 text-xs"
+                  aria-label={`Prompt of node ${index + 1}`}
+                />
+              </label>
+            </>,
+          )}
+
+      {spawnsThread(node)
+        ? section(
+            "Model",
+            execution ? `${execution.model}${execution.reasoningLevel ? ` · ${execution.reasoningLevel}` : ""}` : "inherited",
+            <NodeExecutionSection
+              node={node}
+              index={index}
+              only="model"
+              onPatch={(patch) => patchNode(index, patch)}
+            />,
+          )
+        : null}
+
+      {worker
+        ? section(
+            "Skills",
+            node.skills.length > 0 ? `${node.skills.length}` : "none",
+            <>
+              {true ? (
+                <div className="space-y-1">
+                  <span className="text-[11px] text-muted-foreground">
+                    Skills — reviewed ways of working, instead of writing the
+                    rules out yourself. The worker loads them itself.
+                  </span>
+                  {node.skills.length > 0 ? (
+                    <ul className="flex flex-wrap gap-1">
+                      {node.skills.map((skill) => (
+                        <li key={skill}>
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded-sm bg-muted px-1.5 py-0.5 text-[11px]"
+                            onClick={() =>
+                              patchNode(index, {
+                                skills: node.skills.filter((s) => s !== skill),
+                              })
+                            }
+                            aria-label={`Remove skill ${skill}`}
+                          >
+                            {skill}
+                            <Icon name="X" className="size-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {availableSkills.length > 0 ? (
+                    <select
+                      value=""
+                      onChange={(event) => {
+                        const id = event.target.value;
+                        if (!id || node.skills.includes(id)) return;
+                        patchNode(index, { skills: [...node.skills, id] });
+                      }}
+                      aria-label={`Add a skill to node ${index + 1}`}
+                      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                    >
+                      <option value="">Add a skill …</option>
+                      {availableSkills
+                        .filter((skill) => !node.skills.includes(skill.id))
+                        .map((skill) => (
+                          <option key={skill.id} value={skill.id}>
+                            {skill.name} ({skill.scope})
+                          </option>
+                        ))}
+                    </select>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      {skillsError
+                        ? `Skills unavailable: ${skillsError}`
+                        : "No skills found."}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+            </>,
+          )
+        : null}
+
+      {node.kind === "agent"
+        ? section(
+            "Result fields",
+            node.fields.length > 0 ? `${node.fields.length}` : "none",
+            <>
+              {true ? (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-muted-foreground">
+                      Result fields — the worker additionally answers as JSON.
+                      Edges then compare values instead of searching text.
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 shrink-0 px-2"
+                      onClick={() =>
+                        patchNode(index, {
+                          fields: [
+                            ...node.fields,
+                            fieldSchema.parse({
+                              name: `field${node.fields.length + 1}`,
+                            }),
+                          ],
+                        })
+                      }
+                    >
+                      <Icon name="Plus" className="size-3.5" />
+                      Field
+                    </Button>
+                  </div>
+                  {node.fields.map((declared, fieldIndex) => {
+                    const patchField = (patch: Partial<typeof declared>) =>
+                      patchNode(index, {
+                        fields: node.fields.map((entry, i) =>
+                          i === fieldIndex ? { ...entry, ...patch } : entry,
+                        ),
+                      });
+                    return (
+                      <div
+                        key={fieldIndex}
+                        className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1.5"
+                      >
+                        <Input
+                          value={declared.name}
+                          onChange={(event) =>
+                            patchField({ name: event.target.value.toLowerCase() })
+                          }
+                          aria-label={`Name of field ${fieldIndex + 1} in node ${index + 1}`}
+                          className="h-7 w-32"
+                        />
+                        <select
+                          value={declared.type}
+                          onChange={(event) =>
+                            patchField({
+                              type: event.target
+                                .value as (typeof FIELD_TYPES)[number],
+                            })
+                          }
+                          aria-label={`Type of field ${fieldIndex + 1} in node ${index + 1}`}
+                          className="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
+                        >
+                          {FIELD_TYPES.map((type) => (
+                            <option key={type} value={type}>
+                              {FIELD_TYPE_LABELS[type]}
+                            </option>
+                          ))}
+                        </select>
+                        {declared.type === "enum" ? (
+                          <Input
+                            value={declared.options.join(", ")}
+                            onChange={(event) =>
+                              patchField({
+                                options: event.target.value
+                                  .split(",")
+                                  .map((option) => option.trim())
+                                  .filter(Boolean),
+                              })
+                            }
+                            placeholder="APPROVE, REWORK, BLOCK"
+                            aria-label={`Choices of field ${fieldIndex + 1} in node ${index + 1}`}
+                            className="h-7 flex-1"
+                          />
+                        ) : (
+                          <Input
+                            value={declared.description}
+                            onChange={(event) =>
+                              patchField({ description: event.target.value })
+                            }
+                            placeholder="Description (optional)"
+                            aria-label={`Description of field ${fieldIndex + 1} in node ${index + 1}`}
+                            className="h-7 flex-1"
+                          />
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-destructive"
+                          onClick={() =>
+                            patchNode(index, {
+                              fields: node.fields.filter(
+                                (_, i) => i !== fieldIndex,
+                              ),
+                            })
+                          }
+                          aria-label={`Remove field ${fieldIndex + 1} in node ${index + 1}`}
+                        >
+                          <Icon name="Trash2" className="size-3.5" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>,
+          )
+        : null}
+
+      {section(
+        "Edges",
+        `${inCount} in · ${outCount} out`,
+        <div className="space-y-3">
+                {/* Only where there is something to choose between. On a node
+                    with one way out the setting changes nothing, and an inert
+                    dropdown on every node teaches that it does not matter. */}
+                {outCount > 1 ? (
+                  <label className="space-y-1">
+                    <span className="text-[11px] text-muted-foreground">Takes</span>
+                    <select
+                      value={node.routing}
+                      onChange={(event) =>
+                        patchNode(index, {
+                          routing: event.target.value as GraphNode["routing"],
+                        })
+                      }
+                      aria-label={`Routing of node ${index + 1}`}
+                      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                    >
+                      {ROUTING_MODES.map((mode) => (
+                        <option key={mode} value={mode}>
+                          {ROUTING_LABELS[mode]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+              {draft.edges.filter((edge) => edge.from === node.id).length > 1 &&
+              node.routing === "every" ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Every edge whose condition holds is taken, and those branches
+                  run at once. They cannot be merged again afterwards: a branch
+                  that was not taken never arrives, so a node waiting for it
+                  would wait forever.
+                </p>
+              ) : null}
+        {edgeGroup({
+          title: "Incoming edges",
+          entries: incoming(node.id),
+          side: "in",
+          onAdd: () => addEdge(START_NODE, node.id),
+          addLabel: "Incoming",
+        })}
+        {edgeGroup({
+          title: "Outgoing edges",
+          entries: outgoing(node.id),
+          side: "out",
+          onAdd: () => addEdge(node.id, END_NODE),
+          addLabel: "Outgoing",
+          hint: outgoingHint,
+        })}
+        </div>,
+      )}
+
+      {section(
+        "Limits and failure",
+        executionSummary(node),
+        <NodeExecutionSection
+          node={node}
+          index={index}
+          only="limits"
+          onPatch={(patch) => patchNode(index, patch)}
+        />,
+        false,
+      )}
+
+      <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-2.5">
+        <code className="truncate text-[11px] text-muted-foreground">
+          {`{{${node.id}}}`} — how later prompts read this node
+        </code>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-destructive"
+          onClick={() => {
+            setDraft({
+              ...draft,
+              nodes: draft.nodes.filter((_, i) => i !== index),
+              edges: draft.edges.filter(
+                (edge) => edge.from !== node.id && edge.to !== node.id,
+              ),
+              positions: Object.fromEntries(
+                Object.entries(draft.positions ?? {}).filter(([id]) => id !== node.id),
+              ),
+            });
+            setSelection(null);
+          }}
+        >
+          Remove node
+        </Button>
+      </div>
+    </div>
+    );
+  };
+
+  /** Start and End have no settings — only the edges that leave or reach them. */
+  const renderTerminalCard = (which: "start" | "end") => (
+    <div>
+      <div className="flex items-center justify-between gap-2 pb-2">
+        <p className="text-sm">
+          {which === "start" ? "Start" : "End"}{" "}
+          <span className="text-muted-foreground">
+            {which === "start"
+              ? "— where every run begins"
+              : "— where a run is finished"}
+          </span>
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 shrink-0 px-2"
+          onClick={() => setSelection(null)}
+          aria-label="Close the card"
+        >
+          <Icon name="X" className="size-3.5" />
+        </Button>
+      </div>
+      <div className="space-y-3 border-t border-border/60 pt-2.5">
+        {which === "start"
+          ? edgeGroup({
+              title: "Outgoing edges",
+              entries: outgoing(START_NODE),
+              side: "out",
+              onAdd: () => addEdge(START_NODE, nodeIds[0] ?? END_NODE),
+              addLabel: "Outgoing",
+              hint: outgoingHint,
+            })
+          : edgeGroup({
+              title: "Incoming edges",
+              entries: incoming(END_NODE),
+              side: "in",
+              onAdd: () => addEdge(nodeIds[0] ?? START_NODE, END_NODE),
+              addLabel: "Incoming",
+            })}
+      </div>
+    </div>
+  );
+
+  const canvasFor = (className: string) => (
+    <GraphCanvas
+      graph={draft}
+      selectedId={canvasSelection}
+      onSelect={selectById}
+      terminalsSelectable
+      onConnect={(from, to) => {
+        // The same unconditional arrow twice is never meant: it would run the
+        // target twice in parallel, or trip the fallback rule.
+        const duplicate = draft.edges.some(
+          (edge) => edge.from === from && edge.to === to && edge.when === null,
+        );
+        if (!duplicate) addEdge(from, to);
+        selectById(from);
+      }}
+      onEdgeSelect={(from) => selectById(from)}
+      onInsertOnEdge={insertOnEdge}
+      onMoveNode={(id, x, y) =>
+        setDraft((current) => ({
+          ...current,
+          positions: { ...current.positions, [id]: { x, y } },
+        }))
+      }
+      resolveGraph={resolveGraph}
+      className={className}
+    />
+  );
+
+  const canvasHint = (
+    <p className="text-[11px] text-muted-foreground">
+      Click a node to edit it. Drag from the dot under a node to another node
+      to draw an edge.
+    </p>
+  );
+
+  /*
+    The same selection as a row of buttons: reachable by keyboard and screen
+    reader without aiming at a canvas, and the one place a node is added.
+  */
+  /*
+    Which card is open, as one dropdown. It used to be a row of buttons, one per
+    node — tabs in all but name, and on a graph of twelve nodes a wall of them
+    above the card. The canvas is the primary way to pick a node; this is the
+    keyboard's way, and the one place a node is added.
+  */
+  const nodePicker = (
+    <div className="flex items-center gap-2">
+      <select
+        aria-label="Edit node"
+        value={
+          selection === "start" || selection === "end"
+            ? selection
+            : selectedIndex !== null
+              ? String(selectedIndex)
+              : ""
+        }
+        onChange={(event) => {
+          const value = event.target.value;
+          setSelection(
+            value === ""
+              ? null
+              : value === "start" || value === "end"
+                ? value
+                : Number(value),
+          );
+        }}
+        className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
+      >
+        <option value="">{fullscreen ? "Graph settings" : "Choose a node …"}</option>
+        <option value="start">Start</option>
+        {draft.nodes.map((node, index) => (
+          <option key={index} value={index}>
+            {node.label || node.id || `Node ${index + 1}`} ({node.id})
+          </option>
         ))}
+        <option value="end">End</option>
+      </select>
+      <Button size="sm" variant="outline" className="h-8 shrink-0 px-2" onClick={addNode}>
+        <Icon name="Plus" className="size-3.5" />
+        Node
+      </Button>
+    </div>
+  );
+
+  /*
+    The graph's own settings, for the full-screen sidebar when no node is
+    selected — clicking empty canvas is how one "leaves" a node, and the graph
+    is what is left.
+  */
+  const graphSettings = (
+    <div className="space-y-2">
+      <p className="text-sm font-medium">Graph</p>
+      <label className="block space-y-1">
+        <span className="text-[11px] text-muted-foreground">Name</span>
+        <Input
+          value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+          aria-label="Graph name"
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-[11px] text-muted-foreground">
+          Example task — what is this graph for?
+        </span>
+        <Input
+          value={draft.example}
+          onChange={(event) => setDraft({ ...draft, example: event.target.value })}
+          aria-label="Example task"
+        />
+      </label>
+      {/*
+        The studio is for reviewing; the chat is where a graph is written.
+        Both routes are one copy away, so the next change does not start with
+        looking up a command.
+      */}
+      <div className="space-y-1 border-t border-border/60 pt-2.5">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          In the chat
+        </p>
+        <CopyCommand command={`/graph-studio Change the graph ${draft.id || "<graph-id>"}: …`} />
+        <CopyCommand command={`/graph-studio Run ${draft.id || "<graph-id>"} on: …`} />
+      </div>
+      <div className="space-y-1 border-t border-border/60 pt-2.5">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          On the command line
+        </p>
+        <CopyCommand command={runCommand(draft)} />
+        <CopyCommand command={`bb graph-studio show ${draft.id || "<graph-id>"}`} />
+        <CopyCommand command={`bb graph-studio export ${draft.id || "<graph-id>"} > file.json`} />
+      </div>
+    </div>
+  );
+
+  const problemList =
+    problems.length > 0 ? (
+      <ul className="space-y-1">
+        {problems.map((problem) => (
+          <li
+            key={problem.message}
+            className={cn(
+              "flex items-start gap-1.5 text-xs",
+              problem.level === "error"
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            <Icon
+              name={problem.level === "error" ? "AlertTriangle" : "Info"}
+              className="mt-px size-3.5 shrink-0"
+            />
+            {problem.message}
+          </li>
+        ))}
+      </ul>
+    ) : (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Icon name="Check" className="size-3.5" />
+        The graph is runnable.
+      </p>
+    );
+
+  const cardColumn = (
+    <div className="space-y-3">
+      {selectedIndex !== null
+        ? renderNodeCard(draft.nodes[selectedIndex]!, selectedIndex)
+        : selection === "start" || selection === "end"
+          ? renderTerminalCard(selection)
+          : fullscreen
+            ? graphSettings
+            : (
+              <p className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                Click a node in the graph to edit it and its edges.
+              </p>
+            )}
+      {strayEdges.length > 0
+        ? edgeGroup({
+            title: "Edges pointing at no node",
+            entries: strayEdges,
+          })
+        : null}
+    </div>
+  );
+
+
+  /** Back to the computed layout: forgets where nodes were dragged. */
+  const autoLayoutButton =
+    Object.keys(draft.positions ?? {}).length > 0 ? (
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-7 px-2 text-[11px]"
+        onClick={() => setDraft({ ...draft, positions: {} })}
+      >
+        Auto layout
+      </Button>
+    ) : null;
+
+  const historyButtons = (
+    <>
+      {dirty ? (
+        <span className="text-[11px] text-muted-foreground" aria-live="polite">
+          Unsaved changes
+        </span>
+      ) : null}
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-7 px-2"
+        disabled={history.past.length === 0}
+        onClick={undo}
+        aria-label="Undo"
+      >
+        <Icon name="RotateCcw" className="size-3.5" />
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-7 px-2"
+        disabled={history.future.length === 0}
+        onClick={redo}
+        aria-label="Redo"
+      >
+        <Icon name="RotateCcw" className="size-3.5 -scale-x-100" />
+      </Button>
+    </>
+  );
+
+  /*
+    Leaving with unsaved changes asks first. The draft lives only in this
+    component; one click on "Overview" used to drop an hour of editing
+    without a word.
+  */
+  const leaveBanner = confirmLeave ? (
+    <div
+      role="alertdialog"
+      aria-label="Unsaved changes"
+      className="flex flex-wrap items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs"
+    >
+      <span className="mr-auto">This graph has unsaved changes.</span>
+      <Button size="sm" variant="outline" className="h-7" onClick={() => setConfirmLeave(false)}>
+        Keep editing
+      </Button>
+      <Button
+        size="sm"
+        variant="destructive"
+        className="h-7"
+        onClick={() => {
+          setConfirmLeave(false);
+          onCancel();
+        }}
+      >
+        Discard and leave
+      </Button>
+    </div>
+  ) : null;
+
+  /*
+    In full screen the panel view is not rendered underneath: two copies of
+    every field in the document would be two sources of truth for one draft
+    as far as a screen reader — and a test — can tell.
+  */
+  if (fullscreen) {
+    return (
+      <div className="space-y-2">
+        <FullscreenLayer
+          title={draft.name || draft.id || "New graph"}
+          status={
+            blocking.length > 0
+              ? `${blocking.length} ${blocking.length === 1 ? "problem" : "problems"} to fix`
+              : "Runnable"
+          }
+          actions={
+            <>
+            {historyButtons}
+            {autoLayoutButton}
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7"
+              onClick={leave}
+            >
+              Overview
+            </Button>
+            <Button
+              size="sm"
+              className="h-7"
+              disabled={pending || blocking.length > 0 || draft.id === ""}
+              onClick={() => onSave(graphSchema.parse(draft))}
+            >
+              Save
+            </Button>
+            </>
+          }
+          onClose={closeFullscreen}
+          sidebar={
+            <div className="space-y-3">
+              {leaveBanner}
+              {nodePicker}
+              {problemList}
+              {cardColumn}
+            </div>
+          }
+        >
+          <div className="flex h-full flex-col gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+              {canvasHint}
+              <CanvasLegend />
+            </div>
+            {canvasFor("min-h-0 flex-1 h-auto max-h-none rounded-md border-border/60")}
+          </div>
+        </FullscreenLayer>
+        <p className="text-xs text-muted-foreground">
+          Editing “{draft.name || draft.id || "new graph"}” in full screen.
+        </p>
+        <Button size="sm" variant="outline" onClick={closeFullscreen}>
+          Back to the panel
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <Button size="sm" variant="ghost" className="-ml-2 h-6 px-2" onClick={leave}>
+          <Icon name="ChevronLeft" className="size-4" />
+          Overview
+        </Button>
+        <div className="flex items-center gap-2">
+          {historyButtons}
+          {existing ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-destructive"
+              onClick={() => onDelete(existing.id)}
+            >
+              Delete
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            disabled={pending || blocking.length > 0 || draft.id === ""}
+            onClick={() => onSave(graphSchema.parse(draft))}
+          >
+            Save
+          </Button>
+        </div>
+      </div>
+      {leaveBanner}
+
+
+      {!existing ? (
+        <div className="rounded-lg border border-border bg-card px-3 py-3">
+          <p className="text-sm font-medium">Start from a template</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Quicker than starting from nothing. The <em>Patterns</em> headings
+            run from the simplest control flow to the most composed — one step,
+            one branch, several at once, cycles; under <em>Work</em> the arcs
+            for this repo.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <select
+              value={cloneFrom}
+              onChange={(event) => setCloneFrom(event.target.value)}
+              className="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
+            >
+              {groupedLibrary(templates, "section").map((section) => (
+                <optgroup key={section.key} label={section.label}>
+                  {section.graphs.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <Input
+              value={cloneId}
+              onChange={(event) => setCloneId(event.target.value)}
+              placeholder="new-id"
+              aria-label="Id of the new graph"
+              className="h-8 flex-1"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending || cloneId.trim() === ""}
+              onClick={() => {
+                const template = templates.find((entry) => entry.id === cloneFrom);
+                onClone(cloneFrom, cloneId.trim(), template?.name ?? cloneId);
+              }}
+            >
+              Copy
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-[11px] text-muted-foreground">Id (fixed)</span>
+          <Input
+            value={draft.id}
+            disabled={Boolean(existing)}
+            onChange={(event) =>
+              setDraft({ ...draft, id: event.target.value.toLowerCase() })
+            }
+            placeholder="my-graph"
+            aria-label="Graph id"
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[11px] text-muted-foreground">Name</span>
+          <Input
+            value={draft.name}
+            onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+            aria-label="Graph name"
+          />
+        </label>
+      </div>
+
+      {/*
+        The name says what the graph is, the example says what you put into it
+        — and only the second one tells a reader six weeks later whether this
+        is the graph for the task in front of them. It is also what the
+        ready-made command line below offers.
+      */}
+      <label className="block space-y-1">
+        <span className="text-[11px] text-muted-foreground">
+          Example task — what is this graph for?
+        </span>
+        <Input
+          value={draft.example}
+          onChange={(event) => setDraft({ ...draft, example: event.target.value })}
+          placeholder="Move the product filter's sorting to the server side"
+          aria-label="Example task"
+        />
+        <CopyCommand command={runCommand(draft)} />
+      </label>
+
+      {/*
+        The graph is the editor. Nodes and edges used to be two long lists
+        under a picture that could only be looked at, so changing one arrow
+        meant finding it by its index among all the others. Now a node is
+        clicked and its card holds everything about it — settings, and the
+        edges coming in and going out. On a wide panel the card sits next to
+        the graph; on a narrow one, below it. Full screen gives the graph the
+        window and moves the card into a sidebar.
+      */}
+      <div className="@container">
+        <div className="grid gap-3 @3xl:grid-cols-[minmax(0,1fr)_minmax(0,28rem)] @3xl:items-start">
+          <div className="space-y-1.5 @3xl:sticky @3xl:top-0">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Graph
+              </p>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <CanvasLegend />
+                {autoLayoutButton}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => setFullscreen(true)}
+                >
+                  Full screen
+                </Button>
+              </div>
+            </div>
+            {canvasFor("max-h-[55vh]")}
+            {canvasHint}
+            {nodePicker}
+            {problemList}
+          </div>
+          {cardColumn}
+        </div>
       </div>
 
       {/*

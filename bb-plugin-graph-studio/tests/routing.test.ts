@@ -177,6 +177,8 @@ describe("validation of the routing mode", () => {
         ],
       });
     expect(messages(mixed("first")).join()).toMatch(/mixes conditional/);
+    // Names the unconditional targets, so the extra arrow can be found.
+    expect(messages(mixed("first")).join()).toMatch(/\(→ [^)]+, → [^)]+\)/);
     expect(messages(mixed("every")).join()).not.toMatch(/mixes conditional/);
   });
 
