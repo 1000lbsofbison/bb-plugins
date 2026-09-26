@@ -552,7 +552,7 @@ function RunView({
             Overview
           </Button>
           <p className="mt-1 truncate text-sm font-medium">{run.graph.name}</p>
-          <p className="truncate text-xs text-muted-foreground">„{run.input}"</p>
+          <p className="truncate text-xs text-muted-foreground">“{run.input}”</p>
         </div>
         <div className="shrink-0 text-right">
           <p
@@ -819,7 +819,7 @@ function Library({
                   <span className="min-w-0">
                     <span className="block truncate text-sm">{run.graph.name}</span>
                     <span className="block truncate text-[11px] text-muted-foreground">
-                      „{run.input}"
+                      “{run.input}”
                     </span>
                   </span>
                   <span
