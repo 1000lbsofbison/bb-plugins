@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin:
+          - bb-plugin-aside
+          - bb-plugin-graph-studio
+          - bb-plugin-lanes
+          - bb-plugin-listen
+          - bb-plugin-slim-nav
+    defaults:
+      run:
+        working-directory: ${{ matrix.plugin }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: ${{ matrix.plugin }}/package-lock.json
+      - run: npm ci --include=dev
+      - run: npm run typecheck
+      - run: npm test --if-present
+
+  snyk:
+    # Snyk's GitHub integration already checks every pull request. This job
+    # adds a failing check on main and only runs once SNYK_TOKEN is set.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+      - name: Snyk test
+        if: env.SNYK_TOKEN != ''
+        run: npx --yes snyk@latest test --all-projects --severity-threshold=high

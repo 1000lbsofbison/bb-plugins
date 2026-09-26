@@ -1,5 +1,8 @@
 # bb-plugins
 
+[![CI](https://github.com/sajov/bb-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/sajov/bb-plugins/actions/workflows/ci.yml)
+[![Known Vulnerabilities](https://snyk.io/test/github/sajov/bb-plugins/badge.svg)](https://snyk.io/test/github/sajov/bb-plugins)
+
 Four plugins for [BB](https://github.com/get-bb). One repository, because they
 share a toolchain and a set of conventions — not because they belong together.
 

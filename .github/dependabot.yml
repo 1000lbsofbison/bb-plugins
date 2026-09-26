@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directories:
+      - "/bb-plugin-aside"
+      - "/bb-plugin-graph-studio"
+      - "/bb-plugin-lanes"
+      - "/bb-plugin-listen"
+      - "/bb-plugin-slim-nav"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      bb-sdk:
+        patterns:
+          - "@get-bb/*"
+      radix:
+        patterns:
+          - "@radix-ui/*"
+      dev-minor-and-patch:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
