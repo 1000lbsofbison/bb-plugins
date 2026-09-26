@@ -70,7 +70,7 @@ describe("state marks", () => {
       const { container } = render(<StateMark state={state} />);
       const painted = container.querySelector("circle, path")?.getAttribute("class") ?? "";
       cleanup();
-      return /--warning|destructive/.test(painted);
+      return /--primary|destructive/.test(painted);
     };
     expect(coloured("needs-you")).toBe(true);
     expect(coloured("failed")).toBe(true);
@@ -85,7 +85,7 @@ describe("state marks", () => {
   it("does NOT paint waiting in the failure colour", () => {
     const { container } = render(<StateMark state="needs-you" />);
     const painted = container.querySelector("circle")?.getAttribute("class") ?? "";
-    expect(painted).toContain("--warning");
+    expect(painted).toContain("--primary");
     expect(painted).not.toContain("destructive");
   });
 });

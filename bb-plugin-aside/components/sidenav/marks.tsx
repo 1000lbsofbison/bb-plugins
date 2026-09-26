@@ -1,10 +1,11 @@
 // The sidenav's marks.
 //
-// Colour says exactly two things: amber means "waiting for you", red means
+// Colour says exactly two things: blue means "waiting for you", red means
 // "failed". Everything else is greyscale; "working" carries motion, not colour.
-// Amber rather than the accent blue because a question blocks the work and has
-// to survive a glance across a long list; red stays reserved for failure, so
-// the two never have to be told apart by shape alone.
+// The accent blue rather than amber because the product already asks its
+// questions in blue, and a permission prompt is the same interruption as a
+// factual question — one colour for "you are being asked something". Red stays
+// reserved for failure, so the two never have to be told apart by shape alone.
 //
 // Every row carries one, always — a row without a mark reads as "state unknown"
 // rather than "nothing going on". The five are exhaustive by construction: the
@@ -77,7 +78,7 @@ export function StateMark({
             cx="7"
             cy="7"
             r={NEEDS_YOU_RADIUS}
-            className="animate-pulse text-[color:var(--warning,#f59e0b)] motion-reduce:animate-none"
+            className="animate-pulse text-[color:var(--primary,#006fee)] motion-reduce:animate-none"
             fill="currentColor"
           />
         </svg>

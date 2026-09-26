@@ -5,7 +5,7 @@
 // yet. Splitting them across a submenu would make "add a tag I already use"
 // two navigations deep.
 //
-// The chips are grey. Colour in this sidenav says exactly two things — amber
+// The chips are grey. Colour in this sidenav says exactly two things — blue
 // "waiting for you", red "failed" — and a tag is neither. A palette of tag
 // colours would spend the one signal the list has left on labels that already
 // carry their own name.
