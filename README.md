@@ -19,9 +19,9 @@ and thread names in them are placeholders. See
 
 ## Graph Studio
 
-![Graph Studio](docs/screenshots/graph-studio-running.png)
+![Graph Studio editor](docs/screenshots/graph-studio-create.png)
 
-![Graph Studio template picker](docs/screenshots/graph-studio-presets.png)
+![Graph Studio run in the chat](docs/screenshots/graph-studio-chat.png)
 
 An agent graph is a directed graph that may contain cycles. Each node runs as
 its own BB thread; LangGraph holds state, edges, cycles and checkpoints. Runs
