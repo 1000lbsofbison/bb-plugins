@@ -635,6 +635,7 @@ function SpeechToggle() {
   const [state, setState] = useState<{
     enabled: boolean;
     source: "thread" | "default";
+    available: boolean;
   } | null>(null);
 
   const refetch = useCallback(() => {
@@ -650,7 +651,9 @@ function SpeechToggle() {
   useEffect(refetch, [refetch]);
   useRealtime("listen-changed", refetch);
 
-  if (state === null) return null;
+  // No speaker while speaking is not set up: a switch that cannot make a
+  // sound is noise. `listen-changed` brings it back once a voice installs.
+  if (state === null || !state.available) return null;
 
   const set = (enabled: boolean | null) => {
     const call =

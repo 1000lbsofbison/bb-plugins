@@ -53,6 +53,18 @@ export const DEFAULT_SUMMARY_PROMPT = [
   "Message:",
 ].join("\n");
 
+/**
+ * What the composer's speaker button renders from. `available` is false while
+ * speaking is not set up — no runtime, no Node, or the chosen voice not
+ * installed — and the button then stays hidden rather than offering a switch
+ * that would do nothing.
+ */
+const speechChoiceSchema = z.object({
+  enabled: z.boolean(),
+  source: z.enum(["thread", "default"]),
+  available: z.boolean(),
+});
+
 export const rpcContract = defineRpcContract({
   state: {
     input: z.null(),
@@ -115,19 +127,13 @@ export const rpcContract = defineRpcContract({
    */
   threadSpeech: {
     input: z.object({ threadId: z.string() }),
-    output: z.object({
-      enabled: z.boolean(),
-      source: z.enum(["thread", "default"]),
-    }),
+    output: speechChoiceSchema,
   },
 
   /** `enabled: null` drops the thread's choice and follows the setting again. */
   setThreadSpeech: {
     input: z.object({ threadId: z.string(), enabled: z.boolean().nullable() }),
-    output: z.object({
-      enabled: z.boolean(),
-      source: z.enum(["thread", "default"]),
-    }),
+    output: speechChoiceSchema,
   },
 
   /**
@@ -136,18 +142,12 @@ export const rpcContract = defineRpcContract({
    */
   defaultSpeech: {
     input: z.null(),
-    output: z.object({
-      enabled: z.boolean(),
-      source: z.enum(["thread", "default"]),
-    }),
+    output: speechChoiceSchema,
   },
 
   setDefaultSpeech: {
     input: z.object({ enabled: z.boolean() }),
-    output: z.object({
-      enabled: z.boolean(),
-      source: z.enum(["thread", "default"]),
-    }),
+    output: speechChoiceSchema,
   },
 });
 
@@ -318,13 +318,34 @@ export default async function plugin(bb: BbPluginApi) {
   /** The answer both the composer button and the settings page render. */
   async function describeThreadSpeech(
     threadId: string,
-  ): Promise<{ enabled: boolean; source: "thread" | "default" }> {
+  ): Promise<z.infer<typeof speechChoiceSchema>> {
     const override = await readThreadSpeech(threadId);
     const { speak } = await settings.get();
     return {
       enabled: speaksAloud({ enabled: speak, override }),
       source: override === null ? "default" : "thread",
+      available: await speechAvailable(),
     };
+  }
+
+  /**
+   * Whether an answer could be spoken right now. A host that cannot be
+   * reached counts as not set up: the button would fail either way.
+   */
+  async function speechAvailable(): Promise<boolean> {
+    try {
+      const [{ setup, voices }, { voiceModel }] = await Promise.all([
+        callHost("state", null),
+        settings.get(),
+      ]);
+      return (
+        setup.runtime.installed &&
+        setup.node !== null &&
+        voices.some((voice) => voice.id === voiceModel && voice.installed)
+      );
+    } catch {
+      return false;
+    }
   }
 
   // ─── Reading answers aloud ────────────────────────────────────────────────
@@ -533,12 +554,20 @@ export default async function plugin(bb: BbPluginApi) {
     },
     defaultSpeech: async () => {
       const { speak } = await settings.get();
-      return { enabled: speak, source: "default" as const };
+      return {
+        enabled: speak,
+        source: "default" as const,
+        available: await speechAvailable(),
+      };
     },
     setDefaultSpeech: async ({ enabled }) => {
       await settings.experimental_set({ speak: enabled });
       bb.realtime.publish(CHANGED, {});
-      return { enabled, source: "default" as const };
+      return {
+        enabled,
+        source: "default" as const,
+        available: await speechAvailable(),
+      };
     },
     threadSpeech: async ({ threadId }) => describeThreadSpeech(threadId),
     setThreadSpeech: async ({ threadId, enabled }) => {
