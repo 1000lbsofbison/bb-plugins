@@ -4,7 +4,6 @@ updates:
     directories:
       - "/bb-plugin-aside"
       - "/bb-plugin-graph-studio"
-      - "/bb-plugin-lanes"
       - "/bb-plugin-listen"
       - "/bb-plugin-slim-nav"
     schedule:
