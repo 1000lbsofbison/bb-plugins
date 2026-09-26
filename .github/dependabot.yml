@@ -9,10 +9,16 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # The SDK has to match the installed BB version, so it is bumped by hand.
+      - dependency-name: "@get-bb/*"
+      # Types must follow the Node version CI and BB run on, not the newest.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Major bumps need a manual check in BB.
+      - dependency-name: "sonner"
+        update-types: ["version-update:semver-major"]
     groups:
-      bb-sdk:
-        patterns:
-          - "@get-bb/*"
       radix:
         patterns:
           - "@radix-ui/*"
