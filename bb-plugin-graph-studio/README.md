@@ -3,6 +3,10 @@
 Build agent graphs that may contain **cycles**, run them against real BB
 threads, and watch them execute on a live canvas.
 
+![Graph Studio editor](../docs/screenshots/graph-studio-create.png)
+
+![Graph Studio run in the chat](../docs/screenshots/graph-studio-chat.png)
+
 ```sh
 bb graph-studio graphs [search]
 bb graph-studio show harness-arc

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The perspectives of the UX concept (docs/graph-studio-ux-concept.md): the
+// The perspectives of the UX concept: the
 // entry view, the run view and the inline card in the chat. Each rule pinned
 // both ways — a card that shows nothing passes every "does not show" check.
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";

@@ -1,7 +1,4 @@
-# Graph Studio
-
-Build agent graphs that may contain **cycles**, run them against real BB
-threads, and watch them execute on a live canvas.
+## Cycles, not just steps
 
 Most workflow tools run a list of steps forwards. Graph Studio exists for the
 case that breaks them: the reviewer finds a problem and the work has to go
@@ -19,7 +16,18 @@ is no separate API key and no second account.
 
 The canvas shows the graph executing: which node is working, a clock on the
 one currently running, an activity line under it, and a link into the worker's
-own thread while it is still going rather than after it finishes.
+own thread while it is still going rather than after it finishes. The header
+counts finished nodes, steps and tokens; clicking a node lists every attempt
+with its duration, tokens and result, next to the prompt it was given.
+
+## Design and run it from the chat
+
+Ask for a flow in plain words — "build me a flow that reviews and reworks until
+approved" — and the bundled skill has the agent create, change, explain or
+start it. A running graph appears in the thread as a live card with the same
+canvas, and the Graph Studio side panel follows the run beside the chat. The
+full-screen editor is where you review and fine-tune: nodes, prompts, result
+fields, edges and limits in one inspector.
 
 ## Stop and ask a person
 
@@ -70,8 +78,9 @@ bb graph-studio status <run-id>
 ```
 
 An agent inside a BB thread can drive it too, through the
-`graph_studio_graphs`, `graph_studio_describe`, `graph_studio_run` and
-`graph_studio_status` tools.
+`graph_studio_graphs`, `graph_studio_describe`, `graph_studio_get`,
+`graph_studio_save`, `graph_studio_run`, `graph_studio_status` and
+`graph_studio_answer` tools.
 
 ## Requirements
 
