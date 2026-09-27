@@ -454,6 +454,7 @@ const conceptFeature: Draft = {
     {
       id: "explore",
       label: "Explore",
+      skills: ["zoom-out"],
       prompt:
         "Explore the undertaking below in the code. Read the places it touches, name the current state and the real obstacle. Change nothing.\n\nKeep it short: what exists, where it lives, what stands in the way.\n\nUndertaking:\n{{input}}",
     },
@@ -746,6 +747,7 @@ If there is already a critique, work it in:
     {
       id: "plan",
       label: "Plan",
+      skills: ["tdd"],
       prompt:
         "Turn the concept into a step plan.\n\nEach step is small enough to be committed on its own and names the test that secures it. Steps that are mere trimming, you cut.\n\nNumber them, at most two lines per step.\n\nConcept:\n{{concept}}\n\nReview:\n{{grill}}",
     },
@@ -1231,13 +1233,14 @@ const projectEndToEnd: Draft = {
     {
       id: "plan",
       label: "Plan",
-      skills: ["codebase-design"],
+      skills: ["codebase-design", "tdd"],
       prompt:
         "Lay the build of the following concept out in small steps. Each step runs on its own and is testable on its own — no step that only makes sense together with the next.\n\nRead the code it touches first. If the code contradicts the concept, say so here and plan by the code.\n\nConcept:\n{{distill}}",
     },
     {
       id: "build",
       label: "Build",
+      skills: ["tdd"],
       maxVisits: 5,
       prompt:
         "Build the plan. Keep to the steps and their order.\n\nPlan:\n{{plan}}\n\nIf there is a test finding below, fix that first — the cause, not the symptom:\n{{test}}",

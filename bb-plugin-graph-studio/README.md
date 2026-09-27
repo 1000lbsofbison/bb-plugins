@@ -104,7 +104,10 @@ catalogue, and the library search matches the catalogue's own vocabulary
 
 ### Work — flows for this repo
 
-These carry assumptions about how we work here.
+These carry assumptions about how we work here. Their steps run on
+[Matt Pocock's skills](https://github.com/mattpocock/skills) (`grilling`,
+`tdd`, `code-review`, `codebase-design`, `zoom-out` and others), so install
+them first — see [Install](#install).
 
 - **Idea → concept** (`idea-to-concept`) — an interview before there is a task
   at all, then draft and distill. No repo needed.
@@ -499,6 +502,18 @@ their last checkpoint instead of re-running finished nodes.
 bb plugin install git:https://github.com/sajov/bb-plugins.git \
   --subdirectory bb-plugin-graph-studio
 ```
+
+The Work templates need Matt Pocock's skills. Without them a worker is told to
+apply a skill it cannot find and falls back to the prompt alone:
+
+```sh
+npx skills add mattpocock/skills
+```
+
+Skills that publish to an issue tracker, commit, or write ADRs and glossaries
+(`to-spec`, `to-issues`, `implement`, `grill-with-docs`) are deliberately not
+used by a shipped template; nothing leaves the working tree without a human
+step.
 
 ## Development
 

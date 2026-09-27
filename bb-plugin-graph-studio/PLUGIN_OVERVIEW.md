@@ -43,9 +43,6 @@ map-reduce, evaluator–optimizer, supervisor, swarm, state machine, debate — 
 the library search understands the catalogue's own vocabulary, so looking for
 `orchestrator–worker` finds `map-reduce`.
 
-Every graph carries an example task in plain words, so the run field is never
-an empty box asking what to type.
-
 ## Edges you can read
 
 Conditions are a small, inspectable language — `always`, `contains`, `equals`,
@@ -86,5 +83,9 @@ An agent inside a BB thread can drive it too, through the
 
 Requires BB 0.42 or later and Plugin SDK 0.4.47 or later. No extra service,
 account or API key is needed — runs use the providers BB is already configured
-with. State, edges and checkpoints are handled by LangGraph; execution,
-threads and permissions by BB.
+with.
+
+The Work templates run their steps on
+[Matt Pocock's skills](https://github.com/mattpocock/skills). Install them
+first with `npx skills add mattpocock/skills`; without them those steps fall
+back to their prompt alone. The Pattern templates need no skills.
