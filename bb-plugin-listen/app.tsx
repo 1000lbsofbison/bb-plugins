@@ -12,6 +12,7 @@ import type { ReactNode } from "react";
 import {
   definePluginApp,
   useBbContext,
+  useBbNavigate,
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -22,6 +23,12 @@ import { Icon } from "@/components/ui/icon";
 import { Check, Close, SpeakerOff, SpeakerOn } from "./components/speech-icons";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import {
+  createRowSync,
+  rowStatuses,
+  SPEAKER_ICON,
+  type RowStatus,
+} from "./lib/speech/thread-rows";
 
 interface State {
   setup: SetupState;
@@ -556,6 +563,19 @@ function ListenSettings() {
 }
 
 /**
+ * The bridge between the player, which knows what to mark, and the content
+ * script, which holds the host's row-status setter. Either may start first,
+ * so the latest statuses wait here until the setter arrives.
+ */
+let latestRowStatuses = new Map<string, RowStatus>();
+let applyRowStatuses: ((next: Map<string, RowStatus>) => void) | null = null;
+
+function showRowStatuses(next: Map<string, RowStatus>) {
+  latestRowStatuses = next;
+  applyRowStatuses?.(next);
+}
+
+/**
  * Plays what the server announces, and shows that it is doing so.
  *
  * Mounted app-wide rather than in the thread: an answer can finish while the
@@ -564,7 +584,27 @@ function ListenSettings() {
  */
 function SpeechPlayer() {
   const rpc = useRpc<typeof rpcContract>();
-  const [speaking, setSpeaking] = useState<{ text: string } | null>(null);
+  const navigate = useBbNavigate();
+  const [speaking, setSpeaking] = useState<{
+    text: string;
+    threadId: string;
+    threadTitle: string | null;
+  } | null>(null);
+  const [marked, setMarked] = useState<string[]>([]);
+
+  const refetchMarked = useCallback(() => {
+    rpc.call("speakingThreads", null).then(
+      ({ threadIds }) => setMarked(threadIds),
+      () => setMarked([]),
+    );
+  }, [rpc]);
+  useEffect(refetchMarked, [refetchMarked]);
+  useRealtime("listen-changed", refetchMarked);
+
+  const speakingThreadId = speaking?.threadId ?? null;
+  useEffect(() => {
+    showRowStatuses(rowStatuses(marked, speakingThreadId));
+  }, [marked, speakingThreadId]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const stop = useCallback(() => {
@@ -587,7 +627,11 @@ function SpeechPlayer() {
           audioRef.current?.pause();
           const audio = new Audio(`data:audio/wav;base64,${clip.wavBase64}`);
           audioRef.current = audio;
-          setSpeaking({ text: clip.text });
+          setSpeaking({
+            text: clip.text,
+            threadId: clip.threadId,
+            threadTitle: clip.threadTitle,
+          });
           audio.addEventListener("ended", () => {
             if (audioRef.current === audio) stop();
           });
@@ -607,7 +651,16 @@ function SpeechPlayer() {
   return (
     <div className="pointer-events-auto fixed bottom-4 right-4 z-50 flex max-w-sm items-start gap-2 rounded-lg border border-border bg-card p-3 shadow-lg">
       <SpeakerOn className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-      <p className="min-w-0 flex-1 text-sm">{speaking.text}</p>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm">{speaking.text}</p>
+        <button
+          type="button"
+          className="mt-1 max-w-full truncate text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={() => navigate.toThread(speaking.threadId)}
+        >
+          {speaking.threadTitle ?? "Open thread"}
+        </button>
+      </div>
       <Button
         variant="ghost"
         size="icon"
@@ -695,6 +748,22 @@ function SpeechToggle() {
 }
 
 export default definePluginApp((app) => {
+  // BB's icon set has no speaker, and the row status only takes a name.
+  app.experimental_icons.register({ name: SPEAKER_ICON, component: SpeakerOn });
+  app.contentScripts.register({
+    id: "listen-thread-rows",
+    mount(context) {
+      const set = context.experimental_setThreadRowStatus;
+      // Older clients without row statuses simply show no marker.
+      if (set === undefined) return;
+      const sync = createRowSync(set);
+      applyRowStatuses = sync;
+      sync(latestRowStatuses);
+      return () => {
+        if (applyRowStatuses === sync) applyRowStatuses = null;
+      };
+    },
+  });
   app.slots.settingsSection({
     id: "listen-setup",
     title: "Speech runtime and models",

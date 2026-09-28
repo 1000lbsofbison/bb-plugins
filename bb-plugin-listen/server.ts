@@ -117,7 +117,23 @@ export const rpcContract = defineRpcContract({
    */
   takeSpeech: {
     input: z.object({ id: z.string() }),
-    output: z.object({ wavBase64: z.string(), text: z.string() }).nullable(),
+    output: z
+      .object({
+        wavBase64: z.string(),
+        text: z.string(),
+        threadId: z.string(),
+        threadTitle: z.string().nullable(),
+      })
+      .nullable(),
+  },
+
+  /**
+   * Threads that chose to speak with the composer button. Only explicit
+   * choices: with the setting on, marking every thread would mark nothing.
+   */
+  speakingThreads: {
+    input: z.null(),
+    output: z.object({ threadIds: z.array(z.string()) }),
   },
 
   /**
@@ -358,7 +374,13 @@ export default async function plugin(bb: BbPluginApi) {
    * the browser fetches the bytes over RPC — so a second window that also
    * hears the signal collects nothing and stays quiet.
    */
-  let pending: { id: string; wavBase64: string; text: string } | null = null;
+  let pending: {
+    id: string;
+    wavBase64: string;
+    text: string;
+    threadId: string;
+    threadTitle: string | null;
+  } | null = null;
 
   /** Hidden threads we started, so their own idle events do not loop back. */
   const ourWorkers = new Set<string>();
@@ -509,7 +531,13 @@ export default async function plugin(bb: BbPluginApi) {
           modelId: null,
           sid: null,
         });
-        pending = { id: randomUUID(), wavBase64: audio.wavBase64, text: spoken.text };
+        pending = {
+          id: randomUUID(),
+          wavBase64: audio.wavBase64,
+          text: spoken.text,
+          threadId: thread.id,
+          threadTitle: thread.title ?? null,
+        };
         bb.realtime.publish(SPEAK, { id: pending.id, threadId: thread.id });
       } catch (cause) {
         bb.log.warn(`could not speak an answer: ${String(cause)}`);
@@ -580,7 +608,18 @@ export default async function plugin(bb: BbPluginApi) {
       if (pending === null || pending.id !== id) return null;
       const clip = pending;
       pending = null;
-      return { wavBase64: clip.wavBase64, text: clip.text };
+      return {
+        wavBase64: clip.wavBase64,
+        text: clip.text,
+        threadId: clip.threadId,
+        threadTitle: clip.threadTitle,
+      };
+    },
+    speakingThreads: async () => {
+      const all = await readAllThreadSpeech();
+      return {
+        threadIds: Object.keys(all).filter((threadId) => all[threadId] === true),
+      };
     },
   });
 
