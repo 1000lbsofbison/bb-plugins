@@ -252,3 +252,23 @@ describe("a subgraph node as an import", () => {
   });
 });
 
+
+describe("user colour", () => {
+  const coloured = (color: string | null) =>
+    graphSchema.parse({
+      id: "c",
+      name: "Colour",
+      nodes: [{ id: "a", label: "A", kind: "agent", prompt: "x", color }],
+      edges: [{ from: START, to: "a" }, { from: "a", to: END }],
+    });
+
+  it("draws the chosen colour on the card", () => {
+    render(<GraphCanvas graph={coloured("#46A758")} />);
+    expect(screen.getByTestId("node-color").style.background).toContain("70, 167, 88");
+  });
+
+  it("draws no colour when none is chosen", () => {
+    render(<GraphCanvas graph={coloured(null)} />);
+    expect(screen.queryByTestId("node-color")).toBeNull();
+  });
+});

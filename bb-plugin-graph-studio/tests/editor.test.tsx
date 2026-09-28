@@ -268,7 +268,7 @@ describe("GraphEditor", () => {
       fireEvent.click(
         screen.getByRole("button", { name: "Apply execution selection" }),
       );
-      expect(screen.getAllByText("claude-opus-5").length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/claude-opus-5/).length).toBeGreaterThan(0);
     });
 
     it("says Default when a node deviates in nothing", () => {
@@ -997,5 +997,32 @@ describe("GraphEditor > positions", () => {
   it("offers no Auto layout while the layout is computed anyway", () => {
     open({ ...base(), positions: {} });
     expect(screen.queryByRole("button", { name: "Auto layout" })).toBeNull();
+  });
+});
+
+describe("node colour picker", () => {
+  it("writes the chosen colour into the graph and clears it again", () => {
+    const onSave = vi.fn();
+    editor({
+      graphs: [],
+      templates: TEMPLATES,
+      graphId: null,
+      pending: false,
+      onSave,
+      onCancel: noop,
+      onClone: noop,
+      onDelete: noop,
+    });
+    fireEvent.change(screen.getByLabelText("Graph id"), { target: { value: "my-graph" } });
+    fireEvent.change(screen.getByLabelText("Graph name"), { target: { value: "My Graph" } });
+    const picker = screen.getByRole("radiogroup", { name: "Colour of node 1" });
+
+    fireEvent.click(within(picker).getByRole("radio", { name: "Colour #7C5CFF" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSave.mock.calls[0]![0].nodes[0].color).toBe("#7C5CFF");
+
+    fireEvent.click(within(picker).getByRole("radio", { name: "No colour" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSave.mock.calls[1]![0].nodes[0].color).toBeNull();
   });
 });

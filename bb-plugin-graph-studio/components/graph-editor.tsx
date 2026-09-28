@@ -17,6 +17,7 @@ import {
   END_NODE,
   FIELD_TYPES,
   KIND_LABEL,
+  NODE_COLORS,
   NODE_KINDS,
   ROUTING_MODES,
   START_NODE,
@@ -1341,6 +1342,45 @@ export function GraphEditor({
                     aria-label={`Label of node ${index + 1}`}
                   />
                 </label>
+                <div className="space-y-1 sm:col-span-2">
+                  <span className="text-[11px] text-muted-foreground">Colour</span>
+                  <div
+                    role="radiogroup"
+                    aria-label={`Colour of node ${index + 1}`}
+                    className="flex flex-wrap items-center gap-1"
+                  >
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={node.color === null}
+                      aria-label="No colour"
+                      title="No colour"
+                      onClick={() => patchNode(index, { color: null })}
+                      className={cn(
+                        "size-5 rounded border border-dashed border-border text-[10px] leading-none text-muted-foreground",
+                        node.color === null && "ring-1 ring-ring ring-offset-1 ring-offset-background",
+                      )}
+                    >
+                      ∅
+                    </button>
+                    {NODE_COLORS.map((swatch) => (
+                      <button
+                        key={swatch}
+                        type="button"
+                        role="radio"
+                        aria-checked={node.color === swatch}
+                        aria-label={`Colour ${swatch}`}
+                        title={swatch}
+                        onClick={() => patchNode(index, { color: swatch })}
+                        className={cn(
+                          "size-5 rounded border border-border",
+                          node.color === swatch && "ring-1 ring-ring ring-offset-1 ring-offset-background",
+                        )}
+                        style={{ backgroundColor: swatch }}
+                      />
+                    ))}
+                  </div>
+                </div>
           </div>
                 {/* Five kinds as five buttons: an option that is a whole
                     sentence was the only way to say what each does, and a

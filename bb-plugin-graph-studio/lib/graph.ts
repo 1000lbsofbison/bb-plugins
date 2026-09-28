@@ -146,6 +146,26 @@ export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 export const SERVICE_TIERS = ["default", "fast"] as const;
 export type ServiceTier = (typeof SERVICE_TIERS)[number];
 
+/**
+ * Card colours, the same set the aside plugin offers for projects — so a
+ * colour means the same kind of thing in both places: something the user
+ * chose, not something the tool decided.
+ */
+export const NODE_COLORS = [
+  "#FFFFFF",
+  "#A1A1A1",
+  "#525252",
+  "#000000",
+  "#0070F3",
+  "#7C5CFF",
+  "#0AC5B3",
+  "#46A758",
+  "#C9A227",
+  "#E07B39",
+  "#E5484D",
+  "#BE6BA8",
+] as const;
+
 export const nodeSchema = z.object({
   id: z
     .string()
@@ -222,6 +242,18 @@ export const nodeSchema = z.object({
   model: z.string().nullable().default(null),
   reasoningLevel: z.enum(REASONING_LEVELS).nullable().default(null),
   serviceTier: z.enum(SERVICE_TIERS).nullable().default(null),
+  /**
+   * The card's colour, chosen by the user; null leaves it neutral. No colour
+   * is derived automatically: a graph where every card is tinted says nothing
+   * with its tint.
+   */
+  color: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
+      z.enum(NODE_COLORS),
+    )
+    .nullable()
+    .default(null),
 });
 export type GraphNode = z.infer<typeof nodeSchema>;
 

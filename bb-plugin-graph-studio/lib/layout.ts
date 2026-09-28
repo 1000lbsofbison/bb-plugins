@@ -19,7 +19,7 @@ import {
 } from "./graph";
 
 export const NODE_WIDTH = 172;
-export const NODE_HEIGHT = 56;
+export const NODE_HEIGHT = 72;
 /**
  * The vertical gap between two layers is not constant: it exists to hold the
  * arrow, and only a labelled arrow needs room for text. A uniform gap wide

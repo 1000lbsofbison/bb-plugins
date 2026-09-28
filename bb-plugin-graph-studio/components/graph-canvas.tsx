@@ -34,6 +34,8 @@ import {
   KIND_LABEL,
   START_NODE,
   nodeExecution,
+  spawnsThread,
+  type NodeExecution,
   type Graph,
   type GraphNode,
 } from "../lib/graph";
@@ -47,8 +49,12 @@ import { cn } from "@/lib/utils";
  * 172px node shows.
  */
 function shortModel(model: string): string {
-  const tail = model.split("/").pop() ?? model;
-  return tail.length > 14 ? `…${tail.slice(-13)}` : tail;
+  // The vendor prefix and a trailing release date say the same on every node
+  // of a graph; dropping them leaves "opus-5-5" instead of "…aude-opus-5-5".
+  const tail = (model.split("/").pop() ?? model)
+    .replace(/^claude-/, "")
+    .replace(/-\d{8}$/, "");
+  return tail.length > 16 ? `${tail.slice(0, 15)}…` : tail;
 }
 
 export type NodeVisualStatus =
@@ -152,6 +158,63 @@ const STATUS_STROKE: Record<NodeVisualStatus, string> = {
   failed: "var(--destructive)",
   waiting: "var(--primary)",
 };
+
+const STATUS_DOT: Record<NodeVisualStatus, string> = {
+  idle: "color-mix(in oklab, var(--muted-foreground) 50%, transparent)",
+  running: "var(--primary)",
+  done: "color-mix(in oklab, var(--primary) 70%, var(--foreground))",
+  failed: "var(--destructive)",
+  waiting: "var(--primary)",
+};
+
+type Chip = { key: string; text: string; title?: string; strong?: boolean; quiet?: boolean };
+
+/**
+ * The facts a card has room for, most telling first: which model, how hard it
+ * thinks, which skills it follows, what it hands on. Anything left at its
+ * default stays off the card — a chip that is always there says nothing.
+ */
+export function nodeChips(node: GraphNode, execution: NodeExecution | null): Chip[] {
+  const chips: Chip[] = [];
+  if (spawnsThread(node)) {
+    if (execution) {
+      chips.push({
+        key: "model",
+        text: shortModel(execution.model),
+        title: `${execution.providerId} / ${execution.model}`,
+        strong: true,
+      });
+      if (execution.reasoningLevel) {
+        chips.push({ key: "reasoning", text: execution.reasoningLevel, title: "Reasoning level" });
+      }
+      if (execution.serviceTier === "fast") {
+        chips.push({ key: "tier", text: "⚡ fast", title: "Fast service tier" });
+      }
+    } else {
+      chips.push({
+        key: "model",
+        text: "inherits model",
+        title: "Runs on the parent thread's provider and model",
+        quiet: true,
+      });
+    }
+  }
+  if (node.skills.length > 0) {
+    chips.push({
+      key: "skills",
+      text: node.skills.length === 1 ? "1 skill" : `${node.skills.length} skills`,
+      title: node.skills.join(", "),
+    });
+  }
+  if (node.fields.length > 0) {
+    chips.push({
+      key: "fields",
+      text: node.fields.length === 1 ? "1 field" : `${node.fields.length} fields`,
+      title: node.fields.map((field) => field.name).join(", "),
+    });
+  }
+  return chips;
+}
 
 const STATUS_LABEL: Record<NodeVisualStatus, string> = {
   idle: "open",
@@ -259,9 +322,11 @@ function StepView({ data }: NodeProps<StepNode>) {
   // name is enough on the canvas; the full one is in the tooltip and the
   // editor.
   const execution = nodeExecution(node);
-  // The label gives up room for the model marker rather than running
-  // underneath it.
-  const labelRoom = execution ? 14 : 22;
+  const chips = nodeChips(node, execution);
+  const kindLine =
+    node.kind === "subgraph"
+      ? `imports ${child?.name ?? (node.graphId || "nothing yet")}`
+      : KIND_LABEL[node.kind];
 
   return (
     <div
@@ -281,12 +346,31 @@ function StepView({ data }: NodeProps<StepNode>) {
         className={handleClass(data.connectable)}
       />
       <div
-        className="flex h-full w-full flex-col justify-center gap-1 rounded-[10px] px-3"
+        className="flex h-full w-full flex-col justify-between overflow-hidden rounded-[10px] py-1.5 pl-3 pr-2.5 shadow-sm"
         style={{
           background: STATUS_FILL[status],
           border: `${selected ? 2.5 : 1.5}px solid ${selected ? "var(--primary)" : STATUS_STROKE[status]}`,
         }}
       >
+        {/* The user's colour as a spine plus a faint wash — enough to group
+            cards at a glance, too little to fight the status colours. */}
+        {node.color ? (
+          <>
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 rounded-[10px]"
+              style={{
+                background: `linear-gradient(90deg, color-mix(in oklab, ${node.color} 16%, transparent), transparent 70%)`,
+              }}
+            />
+            <span
+              aria-hidden
+              data-testid="node-color"
+              className="pointer-events-none absolute inset-y-[5px] left-[3px] w-[3px] rounded-full"
+              style={{ background: node.color }}
+            />
+          </>
+        ) : null}
         {status === "running" ? (
           // The marching border, as before: a dashed outline whose offset
           // runs, so a running node moves even while its text stands still.
@@ -317,46 +401,61 @@ function StepView({ data }: NodeProps<StepNode>) {
             </rect>
           </svg>
         ) : null}
-        <div className="flex items-baseline justify-between gap-2">
-          <span className="truncate text-xs font-medium text-foreground">
-            {node.label.length > labelRoom
-              ? `${node.label.slice(0, labelRoom - 1)}…`
-              : node.label}
-          </span>
-          {execution ? (
-            <span
-              className="shrink-0 text-[9px] text-muted-foreground"
-              title={`${execution.providerId} / ${execution.model}`}
-            >
-              {shortModel(execution.model)}
-            </span>
-          ) : null}
-        </div>
-        <div className="flex items-baseline justify-between gap-2 text-[10px]">
-          <span className="truncate text-muted-foreground">
-            {node.kind === "subgraph"
-              ? `imports ${child?.name ?? (node.graphId || "nothing yet")}`
-              : KIND_LABEL[node.kind]}
+        <div className="relative flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.06em] text-muted-foreground">
+          <span className="truncate">
+            {kindLine}
             {/* Two nodes with the same edges branch completely differently
                 under `every`, and the drawing alone cannot show it: the
                 arrows look identical. Said here, or the graph lies. */}
             {node.routing === "every" ? " · any match" : ""}
-            {" · "}
+          </span>
+          <span className="flex shrink-0 items-center gap-1 normal-case tracking-normal">
+            <span
+              aria-hidden
+              className={cn("size-1.5 rounded-full", status === "running" && "animate-pulse")}
+              style={{ background: STATUS_DOT[status] }}
+            />
             {statusText}
+          </span>
+        </div>
+        <div className="relative flex items-baseline justify-between gap-2">
+          <span className="truncate text-xs font-medium text-foreground" title={node.label}>
+            {node.label}
           </span>
           {/* The clock takes this corner from the visit limit while the node
               runs: how long it has been going is the question being asked
               right now, and how often it may go round is not. The limit comes
               back the moment the node stops. */}
           {elapsed ? (
-            <span className="shrink-0 tabular-nums text-foreground">{elapsed}</span>
+            <span className="shrink-0 text-[10px] tabular-nums text-foreground">{elapsed}</span>
           ) : node.maxVisits > 1 ? (
             // In a run the count so far is the news: a loop on its third of
             // three rounds is about to give up.
-            <span className="shrink-0 text-muted-foreground">
+            <span className="shrink-0 text-[10px] text-muted-foreground">
               {visits > 0 ? `${visits}/${node.maxVisits}×` : `max ${node.maxVisits}×`}
             </span>
           ) : null}
+        </div>
+        {/* A node on its own model is drawn exactly like one that inherits,
+            and that difference is what explains two agents behaving
+            differently — so the model gets a chip, and inheriting says so. */}
+        <div className="relative flex min-h-[15px] items-center gap-1 overflow-hidden">
+          {chips.map((chip) => (
+            <span
+              key={chip.key}
+              className={cn(
+                "shrink-0 truncate rounded-[4px] px-1 text-[9px] leading-[14px]",
+                chip.strong
+                  ? "max-w-[92px] font-medium text-foreground"
+                  : "bg-muted text-muted-foreground",
+                chip.quiet && "bg-transparent px-0 italic",
+              )}
+              style={chip.strong ? { background: "color-mix(in oklab, var(--primary) 14%, transparent)" } : undefined}
+              title={chip.title}
+            >
+              {chip.text}
+            </span>
+          ))}
         </div>
       </div>
       {/* A subgraph node is an import: the imported graph opens in place,
@@ -387,7 +486,7 @@ function StepView({ data }: NodeProps<StepNode>) {
         </div>
       ) : null}
       {/* Below the node, in the gap that holds the outgoing arrow: the node
-          itself is 56px of two full text lines, and making every node taller
+          itself is 72px of three full text lines, and making every node taller
           for a line only running nodes ever show would charge every graph in
           the library for it. Opaque, so it wins against the arrow it
           crosses. */}
