@@ -176,6 +176,12 @@ export function ProjectRow({
                 if (project.isPersonal) return;
                 onStartRename();
               }}
+              onMouseDown={(event) => {
+                // A right click must not focus the button: the menu opens on
+                // the same mousedown, and a focus change racing its own focus
+                // trap closed it again right away.
+                if (event.button === 2 || event.ctrlKey) event.preventDefault();
+              }}
               className="absolute inset-0 cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
             <span
@@ -248,7 +254,13 @@ export function ProjectRow({
             />
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="w-56">
+        <ContextMenuContent
+          className="w-56"
+          // Only a click outside or Escape closes this menu. Focus wandering off
+          // — to the host, or back to the row under the pointer — used to close
+          // it the moment it had opened, so a right click often only flashed.
+          onFocusOutside={(event) => event.preventDefault()}
+        >
           <ContextMenuItem
             onSelect={() =>
               actions.openNewThread({ projectId: project.id, focusPrompt: true })
