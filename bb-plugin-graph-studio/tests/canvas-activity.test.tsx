@@ -96,10 +96,9 @@ describe("the canvas while a node runs", () => {
     expect(screen.queryByText("4:12")).toBeNull();
   });
 
-  // The clock and the visit limit share the node's bottom-right corner. While
-  // a node runs, how long it has been going is the live question; how often it
-  // may go round again is not — and afterwards it is the other way round.
-  it("gives the visit limit's corner to the clock while the node runs", () => {
+  // The clock sits bottom right, below the title; the visit limit keeps its
+  // place next to the title.
+  it("shows the clock alongside the visit limit while the node runs", () => {
     render(
       <GraphCanvas
         graph={graph()}
@@ -109,7 +108,18 @@ describe("the canvas while a node runs", () => {
       />,
     );
     expect(screen.getByText("1:05")).toBeTruthy();
-    expect(screen.queryByText("max 3×")).toBeNull();
+    expect(screen.getByText("max 3×")).toBeTruthy();
+  });
+
+  it("keeps the time a finished node ran", () => {
+    render(
+      <GraphCanvas
+        graph={graph()}
+        statuses={{ write: "done" }}
+        durations={{ write: "2:30" }}
+      />,
+    );
+    expect(screen.getByText("2:30")).toBeTruthy();
   });
 
   it("gives it back once the node is no longer running", () => {

@@ -133,6 +133,8 @@ export type GraphCanvasProps = {
    * what time it is.
    */
   now?: number;
+  /** How long each finished node ran, shown where the running clock was. */
+  durations?: Record<string, string>;
   /**
    * Extra classes on the container — in practice a height cap. The canvas is
    * as tall as the layout needs, and a layered graph grows downwards: eight
@@ -422,13 +424,7 @@ function StepView({ data }: NodeProps<StepNode>) {
           <span className="truncate text-xs font-medium text-foreground" title={node.label}>
             {node.label}
           </span>
-          {/* The clock takes this corner from the visit limit while the node
-              runs: how long it has been going is the question being asked
-              right now, and how often it may go round is not. The limit comes
-              back the moment the node stops. */}
-          {elapsed ? (
-            <span className="shrink-0 text-[10px] tabular-nums text-foreground">{elapsed}</span>
-          ) : node.maxVisits > 1 ? (
+          {node.maxVisits > 1 ? (
             // In a run the count so far is the news: a loop on its third of
             // three rounds is about to give up.
             <span className="shrink-0 text-[10px] text-muted-foreground">
@@ -456,6 +452,18 @@ function StepView({ data }: NodeProps<StepNode>) {
               {chip.text}
             </span>
           ))}
+          {/* Bottom right: the running clock, and once the node has stopped
+              how long it ran. */}
+          {elapsed ? (
+            <span
+              className={cn(
+                "ml-auto shrink-0 pl-1 text-[10px] tabular-nums",
+                status === "running" ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {elapsed}
+            </span>
+          ) : null}
         </div>
       </div>
       {/* A subgraph node is an import: the imported graph opens in place,
@@ -799,6 +807,7 @@ function GraphCanvasInner({
   activeEdgeKeys,
   activity = {},
   now,
+  durations = {},
   className,
 }: GraphCanvasProps) {
   const layout = useMemo(() => layoutGraph(graph), [graph]);
@@ -901,9 +910,8 @@ function GraphCanvasInner({
     // done" is the honest answer where "done" would be a lie about the four
     // still running.
     const branch = branches[placed.id];
-    // Signs of life, shown only while the node runs. Afterwards the duration
-    // belongs to the inspector, which has room to be exact, and the last tool
-    // call is no longer news.
+    // Signs of life, shown only while the node runs: the last tool call is no
+    // longer news once it stops. The clock stays, as the time it ran.
     const live = status === "running" ? activity[placed.id] : undefined;
     return [
       {
@@ -919,7 +927,9 @@ function GraphCanvasInner({
           elapsed:
             live && live.startedAt !== null && now !== undefined
               ? elapsedLabel(live.startedAt, now)
-              : null,
+              : status === "done" || status === "failed"
+                ? (durations[placed.id] ?? null)
+                : null,
           doing: live?.text ?? null,
           visits: visits[placed.id] ?? 0,
           dim: dimUnreached && status === "idle" && !branch,

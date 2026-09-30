@@ -187,3 +187,31 @@ export function activityByNode(
   }
   return out;
 }
+
+/**
+ * How long each finished node ran, as the label `elapsedLabel` would have
+ * shown at its end. Where a node ran more than once — a loop, a fan-out — the
+ * most recently started attempt speaks for it, as in `activityByNode`.
+ */
+export function durationByNode(
+  nodeRuns: ReadonlyArray<{
+    nodeId: string;
+    status: string;
+    startedAt: number | null;
+    endedAt: number | null;
+  }>,
+): Record<string, string> {
+  const latest: Record<string, { startedAt: number; endedAt: number }> = {};
+  for (const nodeRun of nodeRuns) {
+    if (nodeRun.status !== "done" && nodeRun.status !== "failed") continue;
+    if (nodeRun.startedAt === null || nodeRun.endedAt === null) continue;
+    const seen = latest[nodeRun.nodeId];
+    if (seen && seen.startedAt >= nodeRun.startedAt) continue;
+    latest[nodeRun.nodeId] = { startedAt: nodeRun.startedAt, endedAt: nodeRun.endedAt };
+  }
+  const out: Record<string, string> = {};
+  for (const [nodeId, span] of Object.entries(latest)) {
+    out[nodeId] = elapsedLabel(span.startedAt, span.endedAt);
+  }
+  return out;
+}

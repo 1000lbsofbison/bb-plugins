@@ -8,7 +8,7 @@
 // presentation at all. Both mistakes would have compiled, passed a typed test,
 // and shown "Running command" under every node for ten minutes.
 import { describe, expect, it } from "vitest";
-import { activityByNode, describeActivity, elapsedLabel } from "../lib/activity";
+import { activityByNode, describeActivity, durationByNode, elapsedLabel } from "../lib/activity";
 
 const started = (item: Record<string, unknown>) => ({
   item,
@@ -259,5 +259,24 @@ describe("activityByNode", () => {
     expect(activityByNode([attempt({ activity: null })])).toEqual({
       review: { startedAt: 1_000, text: null },
     });
+  });
+});
+
+describe("durationByNode", () => {
+  const run = (over: Partial<{ nodeId: string; status: string; startedAt: number | null; endedAt: number | null }>) => ({
+    nodeId: "review", status: "done", startedAt: 0, endedAt: 65_000, ...over,
+  });
+  it("labels finished nodes with the time they ran", () => {
+    expect(durationByNode([run({})])).toEqual({ review: "1:05" });
+  });
+  it("takes the latest attempt and skips running or incomplete ones", () => {
+    expect(
+      durationByNode([
+        run({ startedAt: 100_000, endedAt: 103_000 }),
+        run({}),
+        run({ nodeId: "write", status: "running", endedAt: null }),
+        run({ nodeId: "plan", endedAt: null }),
+      ]),
+    ).toEqual({ review: "0:03" });
   });
 });

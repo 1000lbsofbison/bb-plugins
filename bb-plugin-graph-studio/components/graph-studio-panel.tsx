@@ -10,7 +10,7 @@ import {
 import type { NodeRunDto, RunDto, rpcContract } from "../server";
 import { KIND_LABEL, START_NODE, edgeKey, fanOutProgress, type Graph } from "../lib/graph";
 import { describeCost, runCommand, runTotal } from "../lib/describe";
-import { activityByNode } from "../lib/activity";
+import { activityByNode, durationByNode } from "../lib/activity";
 import { suggestGraphs } from "../lib/suggest";
 import { GraphPicker } from "./graph-picker";
 import { RunTimeline } from "./run-timeline";
@@ -393,6 +393,7 @@ function RunView({
   }, [run, branches]);
   const travelled = useMemo(() => travelledEdges(run), [run]);
   const activity = useMemo(() => activityByNode(run.nodeRuns), [run]);
+  const durations = useMemo(() => durationByNode(run.nodeRuns), [run]);
   const now = useNow(run.status === "running" || run.status === "stopping");
   const doneCount = run.nodeRuns.filter((node) => node.status === "done").length;
   const total = runTotal(run.nodeRuns);
@@ -499,6 +500,7 @@ function RunView({
       visits={run.state.visits ?? {}}
       dimUnreached={run.nodeRuns.length > 0}
       activity={activity}
+      durations={durations}
       now={now}
       className={className}
     />

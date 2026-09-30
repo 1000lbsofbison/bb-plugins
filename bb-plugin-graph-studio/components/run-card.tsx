@@ -17,7 +17,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { RunDto, rpcContract } from "../server";
 import { fanOutProgress } from "../lib/graph";
-import { activityByNode } from "../lib/activity";
+import { activityByNode, durationByNode } from "../lib/activity";
 import { GraphCanvas } from "./graph-canvas";
 import {
   RUN_STATUS,
@@ -63,6 +63,7 @@ export function GraphRunCard({ attributes }: PluginMessageDirectiveProps) {
   const branches = useMemo(() => (run ? fanOutProgress(run.graph, run.state) : {}), [run]);
   const travelled = useMemo(() => travelledEdges(run ?? null), [run]);
   const activity = useMemo(() => (run ? activityByNode(run.nodeRuns) : {}), [run]);
+  const durations = useMemo(() => (run ? durationByNode(run.nodeRuns) : {}), [run]);
   // The clock ticks while something is still in flight — including the
   // unwind after a stop, which is work ending, not ended.
   const now = useNow(run?.status === "running" || run?.status === "stopping");
@@ -121,6 +122,7 @@ export function GraphRunCard({ attributes }: PluginMessageDirectiveProps) {
         branches={branches}
         activeEdgeKeys={travelled}
         activity={activity}
+        durations={durations}
         now={now}
         dimUnreached={run.nodeRuns.length > 0}
         visits={run.state.visits ?? {}}
