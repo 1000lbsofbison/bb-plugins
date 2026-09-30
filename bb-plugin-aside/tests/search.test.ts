@@ -3,6 +3,8 @@ import {
   MAX_QUERY_LENGTH,
   matchesQuery,
   normalizeQuery,
+  tagPrefix,
+  tagSuggestions,
   queryTerms,
 } from "@/lib/search";
 
@@ -58,5 +60,26 @@ describe("matchesQuery", () => {
 
   it("does not match a typo", () => {
     expect(matchesQuery("Aside", "asdie")).toBe(false);
+  });
+});
+
+describe("tag queries", () => {
+  it("reads a # query as a tag prefix", () => {
+    expect(tagPrefix("#Api")).toBe("api");
+    expect(tagPrefix("  #  ")).toBe("");
+  });
+
+  it("leaves a name query alone", () => {
+    expect(tagPrefix("graph")).toBeNull();
+    expect(tagPrefix("")).toBeNull();
+    expect(tagPrefix("a#b")).toBeNull();
+  });
+
+  it("offers the tags not yet picked, narrowed by the prefix", () => {
+    const known = ["api", "app", "web"];
+    expect(tagSuggestions(known, ["web"], null)).toEqual(["api", "app"]);
+    expect(tagSuggestions(known, [], "ap")).toEqual(["api", "app"]);
+    expect(tagSuggestions(known, ["api"], "ap")).toEqual(["app"]);
+    expect(tagSuggestions(known, [], "zz")).toEqual([]);
   });
 });

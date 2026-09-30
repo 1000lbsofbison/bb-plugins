@@ -1,4 +1,4 @@
-// The state of the View menu, the collapsed rows and the tag filter.
+// The state of the header menus, the collapsed rows and the tag filter.
 //
 // Pure data handling: parse, check, write. The value lives in the server's
 // plugin database (host-wide, across devices) and may contain anything — a
@@ -17,8 +17,16 @@ export interface ViewState {
   threadSort: ThreadSort;
   /** Condense quiet families into a single row. */
   foldQuiet: boolean;
-  /** Keep only the project open that is being worked in. */
-  accordion: boolean;
+  /**
+   * Focus follows the active thread: opening a thread collapses every other
+   * project. Replaces the old "One project open at a time" switch, which was
+   * stored but never applied.
+   */
+  focusFollows: boolean;
+  /** The group of pinned threads across all projects at the top of the list. */
+  pinnedGroup: boolean;
+  /** The pinned group is folded to its heading. */
+  pinnedCollapsed: boolean;
   /** Show archived threads too — the only switch that adds. */
   archived: boolean;
   /** Single-line cards without the branch row. */
@@ -40,8 +48,8 @@ export interface ViewState {
    * Tags the list is narrowed to. Empty = everything, which is the default and
    * the state the filter button returns to.
    *
-   * The one thing in here that actually removes rows. It sits apart from the
-   * View menu for that reason — under its own funnel, which says so — and it
+   * The one thing in here that actually removes rows. It is picked in the
+   * search slot and stands as a chip in the scope bar for that reason, and it
    * narrows whole projects, never the threads inside one. A project you did not
    * ask for is gone with everything in it; no thread ever disappears out from
    * under a project that stayed.
@@ -53,7 +61,9 @@ export const DEFAULT_VIEW: ViewState = {
   projectSort: "manual",
   threadSort: "newest",
   foldQuiet: false,
-  accordion: false,
+  focusFollows: false,
+  pinnedGroup: true,
+  pinnedCollapsed: false,
   archived: false,
   compact: false,
   emptyProjects: false,
@@ -106,7 +116,13 @@ export function parseViewState(value: unknown): ViewState {
     ),
     threadSort: readOption(raw.threadSort, THREAD_SORTS, DEFAULT_VIEW.threadSort),
     foldQuiet: readBoolean(raw.foldQuiet, DEFAULT_VIEW.foldQuiet),
-    accordion: readBoolean(raw.accordion, DEFAULT_VIEW.accordion),
+    // `accordion` is the stored name of the switch this one replaced.
+    focusFollows: readBoolean(
+      raw.focusFollows,
+      readBoolean(raw.accordion, DEFAULT_VIEW.focusFollows),
+    ),
+    pinnedGroup: readBoolean(raw.pinnedGroup, DEFAULT_VIEW.pinnedGroup),
+    pinnedCollapsed: readBoolean(raw.pinnedCollapsed, DEFAULT_VIEW.pinnedCollapsed),
     archived: readBoolean(raw.archived, DEFAULT_VIEW.archived),
     compact: readBoolean(raw.compact, DEFAULT_VIEW.compact),
     emptyProjects: readBoolean(raw.emptyProjects, DEFAULT_VIEW.emptyProjects),
@@ -159,4 +175,34 @@ export function accordionCollapse(
   openProjectId: string,
 ): string[] {
   return projectIds.filter((id) => id !== openProjectId).slice(-MAX_IDS);
+}
+
+/**
+ * "Reset view to defaults": sort, display and the tag filter go back to the
+ * defaults. What you arranged by hand — collapsed rows and the personal
+ * project's position — stays, because a reset that also unfolds fifty projects
+ * punishes you for asking.
+ */
+export function resetViewSettings(view: ViewState): ViewState {
+  return {
+    ...DEFAULT_VIEW,
+    personalAfter: view.personalAfter,
+    collapsedProjects: view.collapsedProjects,
+    collapsedSections: view.collapsedSections,
+  };
+}
+
+/** Is any sort or display setting away from its default? */
+export function isDefaultView(view: ViewState): boolean {
+  return (
+    view.projectSort === DEFAULT_VIEW.projectSort &&
+    view.threadSort === DEFAULT_VIEW.threadSort &&
+    view.foldQuiet === DEFAULT_VIEW.foldQuiet &&
+    view.focusFollows === DEFAULT_VIEW.focusFollows &&
+    view.archived === DEFAULT_VIEW.archived &&
+    view.compact === DEFAULT_VIEW.compact &&
+    view.emptyProjects === DEFAULT_VIEW.emptyProjects &&
+    view.pinnedGroup === DEFAULT_VIEW.pinnedGroup &&
+    view.tagFilter.length === 0
+  );
 }

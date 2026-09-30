@@ -12,6 +12,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuShortcut,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
@@ -25,6 +26,7 @@ export function SectionRow({
   collapsed,
   renaming,
   threadCount,
+  projectCount,
   onToggle,
   onStartRename,
   onCancelRename,
@@ -40,7 +42,14 @@ export function SectionRow({
   now: number;
   collapsed: boolean;
   renaming: boolean;
+  /** Threads in this section across every project. */
   threadCount: number;
+  /**
+   * Projects that use this section. A host section belongs to no project, so
+   * renaming or dissolving it here changes all of them — the row and the menu
+   * say so.
+   */
+  projectCount: number;
   onToggle: () => void;
   onStartRename: () => void;
   onCancelRename: () => void;
@@ -107,17 +116,39 @@ export function SectionRow({
             </span>
           )}
           <RowCount count={count} open={!collapsed} />
+          {projectCount > 1 ? (
+            <span
+              title={`Also in ${projectCount - 1} other ${projectCount === 2 ? "project" : "projects"}`}
+              className="shrink-0 text-2xs text-muted-foreground/60"
+            >
+              +{projectCount - 1}
+            </span>
+          ) : null}
           <RowTail age={age} now={now} state={state} className="ml-auto" />
         </div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-56">
+      <ContextMenuContent className="w-60">
         <ContextMenuItem onSelect={onStartRename}>
           Rename section
-          <ContextMenuShortcut>Double click</ContextMenuShortcut>
+          <ContextMenuShortcut>
+            {projectCount > 1 ? `in ${projectCount} projects` : "Double click"}
+          </ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onSelect={onDissolve}>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={onToggle}>
+          {collapsed ? "Expand section" : "Collapse section"}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive"
+          onSelect={onDissolve}
+        >
           Dissolve section
-          <ContextMenuShortcut>{threadCount} threads</ContextMenuShortcut>
+          <ContextMenuShortcut>
+            {projectCount > 1
+              ? `${projectCount} projects · ${threadCount} threads`
+              : `${threadCount} threads`}
+          </ContextMenuShortcut>
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

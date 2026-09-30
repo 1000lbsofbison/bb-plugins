@@ -60,3 +60,30 @@ export function matchesQuery(name: string, query: string): boolean {
   const folded = fold(name);
   return terms.every((term) => folded.includes(term));
 }
+
+/**
+ * A query that starts with `#` asks for a tag, not a project name. Returns the
+ * folded rest of it — `""` for a bare `#`, which means "show me the tags" — or
+ * `null` when the query is a name search.
+ */
+export function tagPrefix(query: string): string | null {
+  const normalized = normalizeQuery(query);
+  if (!normalized.startsWith("#")) return null;
+  return fold(normalized.slice(1).trim());
+}
+
+/**
+ * The tags the search slot offers under the field: the ones not yet picked,
+ * narrowed to the `#` prefix while one is typed. Alphabetical order comes from
+ * the caller.
+ */
+export function tagSuggestions(
+  knownTags: readonly string[],
+  active: readonly string[],
+  prefix: string | null,
+): string[] {
+  return knownTags.filter(
+    (tag) =>
+      !active.includes(tag) && (prefix === null || fold(tag).startsWith(prefix)),
+  );
+}

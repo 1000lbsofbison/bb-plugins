@@ -21,33 +21,44 @@ threads "Working" is nearly the whole list, and "Needs you" is the one row
 without its context — both extremes are useless, and both change on their own
 while you are reading. Aside orders and condenses instead:
 
+The header has three zones — **find**, **order and display**, **actions** — and
+every restriction that is standing shows up as a chip underneath it.
+
+- **Search** (`⌥F`) finds projects by name and picks tags: `#` narrows the offer
+  under the field to tags, Enter takes the first, Backspace in an empty field
+  drops the last tag chip.
+- **Sort** orders projects (Manual, Recent activity, Name A–Z) and threads
+  (Newest first, By state). The trigger names the order when it is not the
+  default.
+- **Display** sets the density (Comfortable, Single line), what else is shown
+  (Pinned group, Condense quiet threads, Archived threads, Empty projects) and
+  one behaviour: **Focus follows active thread** folds every other project when
+  the thread on screen moves to another one.
+- **More** holds actions rather than settings: Collapse all (`⌥C`), Expand all
+  (`⌥⇧C`), Select threads…, Clear filters, Reset view to defaults. The reset
+  keeps what you folded by hand.
+- **The scope bar** appears while search, tags or *Archived threads* are on.
+  Each chip removes only itself, *Clear all* removes them together, and
+  `12 / 58` says how much of the list is left.
 - **Dragging** reorders projects. Written through `projects.reorder`, so it is
   host-side and the same order on every device.
-- **Clicking** the project row expands and collapses it, **Alt-click** leaves
-  only that project open.
-- **The fold button** in the header folds every project and unfolds them again —
-  one button, because it is one gesture with two directions. `⌥C` and `⌥⇧C` do
-  the same from the keyboard.
-- **Condense quiet ones** turns silent threads into a single row `... 3 quiet`.
-  Nothing disappears, it only gets smaller.
-- **Show archived** is the only switch in the View menu that adds something.
+- **Clicking** the project row expands and collapses it, **Alt-click** focuses
+  on that project. Its context menu can also fold all of its sections at once.
+- **`⌥↓` / `⌥↑`** jump to the next thread that waits for you or failed, across
+  projects and into folded ones.
+- **Project headers stick** to the top while you scroll through their threads.
 
-Two controls do narrow the list, and both of them narrow whole projects rather
-than the threads inside one:
+## Pinned group
 
-- **Tags** — the funnel in the header, see below. You set the tags yourself, so
-  the result is a list you meant rather than one derived from a state nobody
-  chose.
-- **Search** — the magnifier in the header opens a one-line slot between the
-  menu bar and the list that filters on the project name. `⌥F` opens it and puts
-  the caret in it, `Esc` clears the query and a second `Esc` closes the slot.
-  Matching works the way bb's own search does on a list of names: case and
-  accents are ignored, and several words are an AND in any order, so `studio
-  graph` finds "Graph Studio". Nothing is fuzzy — in a list you navigate by
-  muscle memory, a typo landing on the wrong project costs more than a query
-  that simply finds nothing. The query is never stored: it is a question you are
-  asking now, not a setting, and a saved search would greet you on the next
-  device as a sidenav with projects missing.
+Pinned threads of every shown project are collected in a group at the top, each
+with its project's name and colour. They stay in their projects as well — the
+group is a shortcut, not a move — and it obeys the same search and tag filter
+as the list below it. *Display → Pinned group* turns it off; its heading folds
+it.
+
+Dragging an unpinned thread between pinned ones asks first — *Pin and move* —
+because the host keeps an order only for pinned threads. It used to pin
+silently.
 
 ## The rules
 
@@ -70,9 +81,10 @@ than the threads inside one:
 
 ## Selection mode
 
-The button beside the fold arrow in the header turns it on: every card and
-every agent grows a checkbox, the whole row toggles it, and dragging pauses.
-The bar at the bottom says how many are selected and offers *Delete*.
+*More → Select threads…* turns it on: every card and every agent grows a
+checkbox, the whole row toggles it, and dragging pauses. The bar at the bottom
+stays while the mode is on, says how many are selected and offers *Pin*,
+*Archive* and *Delete*; *Done* leaves the mode.
 
 *Delete* does not delete. It asks first, and the question names what will
 actually go: the threads you picked plus the agents hanging below them. Only
@@ -88,17 +100,17 @@ before their parents.
 
 ## Tags
 
-A project can carry tags, and the funnel in the header narrows the list to
+A project can carry tags, and the search slot narrows the list to
 them.
 
 Tags are the plugin's own: bb 0.43's project model has no field for them
 (`updateProject` carries a name and nothing else), so they sit in the plugin
 database next to the project colours — host-wide, the same on every device.
 
-- **Setting them** happens in the project's context menu, under *Tags*: the
-  tags it carries sit at the top and come off with a click, the field below
-  takes a new one on Enter, and every tag already in use elsewhere is offered
-  as a chip underneath. Up to twelve per project, 24 characters each.
+- **Setting them** happens in the project's context menu, in the *Tags*
+  submenu: the tags it carries sit at the top and come off with a click, the
+  field below takes a new one on Enter, and every tag already in use elsewhere
+  is offered as a chip underneath. Up to twelve per project, 24 characters each.
 - **Stored lower case.** `Work` next to `work` is a duplicate you cannot tell
   apart in a list of chips, so the distinction is removed rather than kept.
 - **The chips are grey.** Colour in this sidenav says two things, amber
@@ -107,12 +119,12 @@ database next to the project colours — host-wide, the same on every device.
 - **The list never shows them.** A project row has a name, a count, an age and
   a mark, and that is the whole budget — tags would be a fifth thing on a
   32-pixel row that already fills its width.
-- **Filtering** is the funnel in the header. Every tag carries the number of
-  projects on it — the same count badge the rows use, filled while the tag is
-  picked. Several tags are an OR: picking `api` and `web` asks for the projects
-  carrying either. While it is on, the
-  funnel fills and carries the count, because a filter you have forgotten about
-  is a sidenav that appears to have lost projects.
+- **Filtering** happens in the search slot: type `#` or click a tag chip under
+  the field. Every tag carries the number of projects on it. Several tags are
+  an OR: picking `api` and `web` asks for the projects carrying either. While a
+  tag filter is on, it stands as a chip in the scope bar even with the search
+  closed, because a filter you have forgotten about is a sidenav that appears
+  to have lost projects.
 - **The project you are working in always stays**, filtered or not: the thread
   in the pane next to it must have a row in the list it belongs to.
 - **A tag that loses its last project stops filtering.** Otherwise the list
@@ -132,6 +144,10 @@ together with its first thread, because an empty section would be visible
 nowhere. Further threads join through the menu or by dragging onto the section
 row. *Dissolve* removes only the assignment; the message names the number of
 threads affected.
+
+Because one section can span several projects, its row carries `+2` when it is
+also used in two other projects, and the menu names the reach before you rename
+or dissolve it (`3 projects · 14 threads`).
 
 ## Dragging
 
@@ -160,7 +176,8 @@ threads affected.
 | `lib/badge.ts` | The count badge, shared by all three rows that carry one |
 | `components/sidenav/row-slots.tsx` | The shared row slots: count in front, age and mark behind |
 | `server.ts` | The writing host calls and three pieces of state we own |
-| `components/sidenav/` | Sidenav, project row, card, section row, View menu, tag editor, tag filter and search slot |
+| `lib/scope.ts` | The chips of the scope bar: what is narrowing the list |
+| `components/sidenav/` | Sidenav, project row, card, section row, header menus (Sort, Display, More), scope bar, tag editor and search slot |
 
 The view state, the project colours and the project tags live in the server's
 plugin database, not in `localStorage`: order, collapsed rows and tags should be

@@ -29,9 +29,11 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
-  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 
@@ -90,6 +92,8 @@ export function ProjectRow({
   renaming,
   onToggle,
   onSolo,
+  sectionsCollapsed,
+  onToggleSections,
   onStartRename,
   onCancelRename,
   onRename,
@@ -114,6 +118,12 @@ export function ProjectRow({
   renaming: boolean;
   onToggle: () => void;
   onSolo: () => void;
+  /**
+   * Whether every section in this project is folded; `null` when it has none,
+   * which hides the menu entry rather than offering to fold nothing.
+   */
+  sectionsCollapsed: boolean | null;
+  onToggleSections: () => void;
   onStartRename: () => void;
   onCancelRename: () => void;
   onRename: (name: string) => void;
@@ -157,7 +167,9 @@ export function ProjectRow({
         <ContextMenuTrigger asChild>
           <div
             ref={headerRef}
-            className="group/project relative flex h-8 select-none items-center gap-2 rounded-md px-1.5 hover:bg-sidebar-accent/60"
+            // Sticky: deep in a long project you still see whose threads you
+            // are scrolling through.
+            className="group/project sticky top-0 z-20 flex h-8 select-none bg-sidebar items-center gap-2 rounded-md px-1.5 hover:bg-sidebar-accent/60"
           >
             <button
               type="button"
@@ -261,6 +273,10 @@ export function ProjectRow({
           // it the moment it had opened, so a right click often only flashed.
           onFocusOutside={(event) => event.preventDefault()}
         >
+          {/* One grammar for every row menu: open or new, edit, organise,
+              visibility, destructive. Tags and colour are submenus — inline
+              they made this the longest menu in the list, with a text field
+              in the middle of it. */}
           <ContextMenuItem
             onSelect={() =>
               actions.openNewThread({ projectId: project.id, focusPrompt: true })
@@ -275,42 +291,64 @@ export function ProjectRow({
               {project.isPersonal ? "implicit" : "Double click"}
             </ContextMenuShortcut>
           </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <span className="min-w-0 flex-1">Tags</span>
+              <span className="ml-2 max-w-24 truncate text-2xs text-muted-foreground">
+                {tags.length > 0 ? tags.join(", ") : "none"}
+              </span>
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="w-56">
+              <TagEditor tags={tags} knownTags={knownTags} onChange={onSetTags} />
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <span className="min-w-0 flex-1">Colour</span>
+              <span
+                aria-hidden
+                className="ml-2 inline-block size-2.5 rounded-sm border border-border"
+                style={{ backgroundColor: background }}
+              />
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="w-48">
+              <div className="grid grid-cols-6 gap-1 px-2 pb-1.5 pt-1.5">
+                {BADGE_PALETTE.map((swatch) => (
+                  <button
+                    key={swatch}
+                    type="button"
+                    aria-label={`Colour ${swatch}`}
+                    aria-pressed={background === swatch}
+                    onClick={() => {
+                      onSetColor(swatch);
+                      setMenuOpen(false);
+                    }}
+                    className={cn(
+                      "aspect-square w-full rounded border border-border",
+                      background === swatch && "ring-1 ring-ring",
+                    )}
+                    style={{ backgroundColor: swatch }}
+                  />
+                ))}
+              </div>
+              <ContextMenuSeparator />
+              <ContextMenuItem onSelect={() => onSetColor(null)}>
+                Automatic colour
+                <ContextMenuShortcut>from the id</ContextMenuShortcut>
+              </ContextMenuItem>
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          <ContextMenuSeparator />
           <ContextMenuItem onSelect={onSolo}>
-            Only this one open
+            Focus on this project
             <ContextMenuShortcut>⌥Click</ContextMenuShortcut>
           </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuLabel className="text-2xs uppercase tracking-wide text-muted-foreground">
-            Colour
-          </ContextMenuLabel>
-          <div className="grid grid-cols-6 gap-1 px-2 pb-1.5 pt-1">
-            {BADGE_PALETTE.map((swatch) => (
-              <button
-                key={swatch}
-                type="button"
-                aria-label={`Colour ${swatch}`}
-                aria-pressed={background === swatch}
-                onClick={() => {
-                  onSetColor(swatch);
-                  setMenuOpen(false);
-                }}
-                className={cn(
-                  "aspect-square w-full rounded border border-border",
-                  background === swatch && "ring-1 ring-ring",
-                )}
-                style={{ backgroundColor: swatch }}
-              />
-            ))}
-          </div>
-          <ContextMenuItem onSelect={() => onSetColor(null)}>
-            Automatic colour
-            <ContextMenuShortcut>from the id</ContextMenuShortcut>
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuLabel className="text-2xs uppercase tracking-wide text-muted-foreground">
-            Tags
-          </ContextMenuLabel>
-          <TagEditor tags={tags} knownTags={knownTags} onChange={onSetTags} />
+          {sectionsCollapsed === null ? null : (
+            <ContextMenuItem onSelect={onToggleSections}>
+              {sectionsCollapsed ? "Expand all sections" : "Collapse all sections"}
+            </ContextMenuItem>
+          )}
         </ContextMenuContent>
       </ContextMenu>
       {collapsed ? null : <div className="mt-0.5 flex flex-col gap-0.5">{children}</div>}

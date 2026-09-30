@@ -97,3 +97,29 @@ describe("selection bar", () => {
     expect(onClear).toHaveBeenCalledOnce();
   });
 });
+
+describe("selection bar in selection mode", () => {
+  it("stays while selecting with nothing picked, with a way out", () => {
+    const onClear = vi.fn();
+    render(bar({ selectedCount: 0, selecting: true, onClear }));
+    expect(screen.getByText("Click threads to select them")).toBeTruthy();
+    fireEvent.click(screen.getByText("Done"));
+    expect(onClear).toHaveBeenCalled();
+  });
+
+  it("offers Pin and Archive only when given", () => {
+    const onPin = vi.fn();
+    const onArchive = vi.fn();
+    render(bar({ onPin, onArchive }));
+    fireEvent.click(screen.getByLabelText("Pin selected threads"));
+    fireEvent.click(screen.getByLabelText("Archive selected threads"));
+    expect(onPin).toHaveBeenCalled();
+    expect(onArchive).toHaveBeenCalled();
+  });
+
+  it("has no Pin or Archive without handlers", () => {
+    render(bar());
+    expect(screen.queryByLabelText("Pin selected threads")).toBeNull();
+    expect(screen.queryByLabelText("Archive selected threads")).toBeNull();
+  });
+});

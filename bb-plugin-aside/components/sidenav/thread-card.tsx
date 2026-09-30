@@ -11,6 +11,7 @@ import {
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { cn } from "@/lib/utils";
+import { badgeForeground, badgeLetter } from "@/lib/colors";
 import { RowCount, RowTail } from "@/components/sidenav/row-slots";
 import {
   familyState,
@@ -159,7 +160,15 @@ export function ThreadCard({
   onStartRename,
   onCancelRename,
   callbacks,
+  pinnedIn,
 }: {
+  /**
+   * Set when the card sits in the pinned group at the top: the project it
+   * belongs to takes the location's place, and the card does not drag — the
+   * group is a shortcut to threads that live in their projects, not a place
+   * to rearrange them.
+   */
+  pinnedIn?: { name: string; color: string };
   family: Family;
   providers: ProviderMap;
   sections: readonly { id: string; name: string }[];
@@ -200,7 +209,7 @@ export function ThreadCard({
           data-aside-card={root.id}
           // Dragging and selecting are the same gesture with the same button.
           // While a selection is running the card stays put.
-          draggable={selection === null}
+          draggable={selection === null && pinnedIn === undefined}
           onDragStart={(event: DragEvent<HTMLDivElement>) => {
             dragging.current = true;
             event.dataTransfer.effectAllowed = "move";
@@ -266,7 +275,19 @@ export function ThreadCard({
             dropWhere === "after" && "shadow-[inset_0_-1px_0_0_var(--muted-foreground)]",
           )}
         >
-          {selection === null ? (
+          {selection === null && pinnedIn !== undefined ? (
+            // In the pinned group the project's avatar takes the harness
+            // mark's place: there the question is "whose thread is this",
+            // and the row is single-line, so the name below would never show.
+            <span
+              aria-hidden
+              title={pinnedIn.name}
+              className="col-start-1 row-start-1 flex size-3.5 items-center justify-center rounded-[3px] border border-black/15 text-[8px] font-semibold uppercase"
+              style={{ backgroundColor: pinnedIn.color, color: badgeForeground(pinnedIn.color) }}
+            >
+              {badgeLetter(pinnedIn.name)}
+            </span>
+          ) : selection === null ? (
             <ProviderGlyph
               providerId={root.providerId}
               providers={providers}
@@ -314,7 +335,7 @@ export function ThreadCard({
                 }}
               />
             ) : null}
-            {root.isPinned ? <PinGlyph className="text-muted-foreground/70" /> : null}
+            {root.isPinned && pinnedIn === undefined ? <PinGlyph className="text-muted-foreground/70" /> : null}
           </div>
 
           <RowTail
@@ -326,7 +347,18 @@ export function ThreadCard({
 
           {compact ? null : (
             <div className="col-start-2 row-start-2 flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground/80">
-              <Location thread={root} />
+              {pinnedIn === undefined ? (
+                <Location thread={root} />
+              ) : (
+                <span className="flex min-w-0 items-center gap-1" title={`Project: ${pinnedIn.name}`}>
+                  <span
+                    aria-hidden
+                    className="inline-block size-2 shrink-0 rounded-sm"
+                    style={{ backgroundColor: pinnedIn.color }}
+                  />
+                  <span className="truncate">{pinnedIn.name}</span>
+                </span>
+              )}
             </div>
           )}
         </div>

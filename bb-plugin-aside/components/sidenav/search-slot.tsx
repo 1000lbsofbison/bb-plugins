@@ -8,9 +8,48 @@
 //
 // Narrow on purpose: one line, no border box, no button. It sits where the list
 // begins, so it reads as the list's own heading rather than as a form.
+//
+// Tags are picked here too, since the funnel is gone: the picked ones sit as
+// chips in front of the caret, `#` narrows the offer below the field to tags,
+// Enter takes the first one offered and Backspace in an empty field drops the
+// last chip. One place to ask "what am I looking at", not two.
 import { useEffect, useRef } from "react";
 import { Icon } from "@/components/ui/icon";
-import { MAX_QUERY_LENGTH } from "@/lib/search";
+import { RowCount } from "@/components/sidenav/row-slots";
+import { MAX_QUERY_LENGTH, tagPrefix, tagSuggestions } from "@/lib/search";
+
+function TagChip({
+  tag,
+  picked,
+  count,
+  onClick,
+}: {
+  tag: string;
+  picked: boolean;
+  count?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={picked ? `Stop filtering on #${tag}` : `Filter on #${tag}`}
+      aria-pressed={picked}
+      onClick={onClick}
+      className={
+        picked
+          ? "flex shrink-0 items-center gap-1 rounded-full border border-border bg-sidebar-accent px-1.5 text-2xs text-foreground"
+          : "flex shrink-0 items-center gap-1 rounded-full border border-border-hairline px-1.5 text-2xs text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+      }
+    >
+      #{tag}
+      {picked ? (
+        <Icon name="X" className="size-2.5 opacity-60" aria-hidden />
+      ) : count === undefined ? null : (
+        <RowCount count={count} open={false} />
+      )}
+    </button>
+  );
+}
 
 export function SearchSlot({
   query,
@@ -18,8 +57,18 @@ export function SearchSlot({
   focusTick,
   onQuery,
   onClose,
+  knownTags,
+  tagCounts,
+  activeTags,
+  onToggleTag,
 }: {
   query: string;
+  /** Every tag in use, alphabetical. */
+  knownTags: readonly string[];
+  tagCounts: Readonly<Record<string, number>>;
+  /** The tags the list is narrowed to. */
+  activeTags: readonly string[];
+  onToggleTag: (tag: string) => void;
   /**
    * How many projects the query leaves. Shown only while something is typed —
    * a zero is the one answer the list itself cannot give, because an empty list
@@ -46,9 +95,15 @@ export function SearchSlot({
   }, [focusTick]);
 
   const typed = query.trim().length > 0;
+  const prefix = tagPrefix(query);
+  const offered = tagSuggestions(knownTags, activeTags, prefix);
   return (
-    <div className="flex h-7 shrink-0 items-center gap-1.5 border-b border-border-hairline px-3">
+    <div className="shrink-0 border-b border-border-hairline">
+    <div className="flex min-h-7 flex-wrap items-center gap-1.5 px-3 py-1">
       <Icon name="Search" className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+      {activeTags.map((tag) => (
+        <TagChip key={tag} tag={tag} picked onClick={() => onToggleTag(tag)} />
+      ))}
       <input
         ref={field}
         type="text"
@@ -56,10 +111,24 @@ export function SearchSlot({
         maxLength={MAX_QUERY_LENGTH}
         autoComplete="off"
         spellCheck={false}
-        aria-label="Filter projects by name"
-        placeholder="Filter projects…"
+        aria-label="Filter projects by name, # for tags"
+        placeholder={activeTags.length > 0 ? "" : "Filter projects… # for tags"}
         onChange={(event) => onQuery(event.target.value)}
         onKeyDown={(event) => {
+          if (event.key === "Enter" && prefix !== null) {
+            event.preventDefault();
+            const first = offered[0];
+            if (first !== undefined) {
+              onToggleTag(first);
+              onQuery("");
+            }
+            return;
+          }
+          if (event.key === "Backspace" && query.length === 0 && activeTags.length > 0) {
+            event.preventDefault();
+            onToggleTag(activeTags[activeTags.length - 1]);
+            return;
+          }
           if (event.key !== "Escape") return;
           event.preventDefault();
           // Escape clears first and closes second: while a query is standing,
@@ -69,7 +138,7 @@ export function SearchSlot({
         }}
         className="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
       />
-      {typed ? (
+      {typed && prefix === null ? (
         <span className="shrink-0 text-2xs tabular-nums text-muted-foreground/70">
           {matchCount}
         </span>
@@ -83,6 +152,28 @@ export function SearchSlot({
       >
         <Icon name="X" className="size-3" aria-hidden />
       </button>
+    </div>
+    {offered.length > 0 ? (
+      <div className="flex max-h-12 flex-wrap gap-1 overflow-y-auto px-3 pb-1.5">
+        {offered.map((tag) => (
+          <TagChip
+            key={tag}
+            tag={tag}
+            picked={false}
+            count={tagCounts[tag] ?? 0}
+            onClick={() => {
+              onToggleTag(tag);
+              if (prefix !== null) onQuery("");
+            }}
+          />
+        ))}
+      </div>
+    ) : knownTags.length === 0 && prefix !== null ? (
+      // Not an empty offer: a `#` that shows nothing reads as broken.
+      <div className="px-3 pb-1.5 text-2xs text-muted-foreground">
+        No tags yet — right-click a project to add one.
+      </div>
+    ) : null}
     </div>
   );
 }

@@ -325,7 +325,7 @@ export function sortProjects(
  *
  * An empty project is a row that answers nothing — whoever created twenty
  * repositories would otherwise scroll past nineteen headings. Two exceptions:
- * the switch in the View menu brings them back, and the project you are
+ * the Display menu brings them back, and the project you are
  * currently in always stays — otherwise the place vanishes from under your feet
  * the moment you archive its last thread.
  */
@@ -378,4 +378,83 @@ export function waitingThreads(
         left.latestAttentionAt - right.latestAttentionAt ||
         left.id.localeCompare(right.id),
     );
+}
+
+/** A pinned root with the project it lives in, for the pinned group. */
+export interface PinnedEntry {
+  family: Family;
+  project: PluginSidebarProject;
+}
+
+/**
+ * Every pinned root across the projects shown, for the group at the top.
+ *
+ * Taken from the blocks the list already shows, so the group obeys the same
+ * search and tag filter as the list below it — a pin from a project you
+ * filtered away would be a row that contradicts the filter chip above it.
+ * The threads stay in their projects too: the group is a shortcut, not a move.
+ */
+export function pinnedFamilies(blocks: readonly ProjectBlock[]): PinnedEntry[] {
+  const entries: PinnedEntry[] = [];
+  for (const block of blocks) {
+    for (const family of block.families) {
+      if (family.root.isPinned) entries.push({ family, project: block.project });
+    }
+  }
+  return entries;
+}
+
+/**
+ * How far a section reaches. In the host a section belongs to no project, so a
+ * rename or a dissolve changes every project that uses it — the menu says how
+ * many before you press it.
+ */
+export function sectionReach(
+  threads: readonly PluginSidebarThread[],
+  sectionId: string,
+): { projects: number; threads: number } {
+  const own = threads.filter((thread) => thread.sectionId === sectionId);
+  return {
+    projects: new Set(own.map((thread) => thread.projectId)).size,
+    threads: own.length,
+  };
+}
+
+/** Every thread in the order the list draws it: projects, families, agents. */
+export function displayOrder(blocks: readonly ProjectBlock[]): PluginSidebarThread[] {
+  return blocks.flatMap((block) =>
+    block.blocks.flatMap((section) => section.families.flatMap(familyMembers)),
+  );
+}
+
+/**
+ * The next thread that stops progress — waiting for you or failed — seen from
+ * the current one, in list order and wrapping at the ends. `null` when there is
+ * none other than the current thread.
+ *
+ * Collapsed projects count: jumping into one is the point, because a folded
+ * project with an amber mark is exactly the row you cannot read from outside.
+ */
+export function nextAttention(
+  ordered: readonly PluginSidebarThread[],
+  currentThreadId: string | null,
+  direction: 1 | -1,
+): PluginSidebarThread | null {
+  const urgent = (thread: PluginSidebarThread) =>
+    !thread.isArchived && (needsUser(thread) || hasFailed(thread));
+  const count = ordered.length;
+  if (count === 0) return null;
+  const start = ordered.findIndex((thread) => thread.id === currentThreadId);
+  for (let step = 1; step <= count; step += 1) {
+    const index =
+      start < 0
+        ? direction === 1
+          ? step - 1
+          : count - step
+        : (((start + direction * step) % count) + count) % count;
+    const candidate = ordered[index];
+    if (candidate.id === currentThreadId) continue;
+    if (urgent(candidate)) return candidate;
+  }
+  return null;
 }

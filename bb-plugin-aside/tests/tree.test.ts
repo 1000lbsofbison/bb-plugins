@@ -5,7 +5,11 @@ import type {
 } from "@get-bb/plugin-sdk/app";
 import {
   countFamilies,
+  displayOrder,
   latestActivity,
+  nextAttention,
+  pinnedFamilies,
+  sectionReach,
   placePersonal,
   withoutEmptyProjects,
   familyState,
@@ -475,5 +479,103 @@ describe("latest activity", () => {
 
   it("is null when there is nothing to date", () => {
     expect(latestActivity([])).toBeNull();
+  });
+});
+
+describe("pinned group", () => {
+  const options = { archived: false, sections: [], threadSort: "newest" as const };
+
+  it("collects the pinned roots of every shown project", () => {
+    const blocks = groupThreads(
+      [
+        thread({ id: "a", projectId: "p1", isPinned: true }),
+        thread({ id: "b", projectId: "p1" }),
+        thread({ id: "c", projectId: "p2", isPinned: true }),
+      ],
+      [project("p1"), project("p2")],
+      options,
+    );
+    expect(pinnedFamilies(blocks).map((entry) => [entry.family.root.id, entry.project.id])).toEqual([
+      ["a", "p1"],
+      ["c", "p2"],
+    ]);
+  });
+
+  it("leaves out unpinned threads and projects the list does not show", () => {
+    const blocks = groupThreads(
+      [thread({ id: "a", projectId: "p1" }), thread({ id: "c", projectId: "p2", isPinned: true })],
+      [project("p1"), project("p2")],
+      options,
+    ).filter((block) => block.project.id === "p1");
+    expect(pinnedFamilies(blocks)).toEqual([]);
+  });
+});
+
+describe("section reach", () => {
+  it("counts the projects and threads that use a section", () => {
+    const threads = [
+      thread({ id: "a", projectId: "p1", sectionId: "s1" }),
+      thread({ id: "b", projectId: "p2", sectionId: "s1" }),
+      thread({ id: "c", projectId: "p2", sectionId: "s1" }),
+      thread({ id: "d", projectId: "p3", sectionId: "s2" }),
+    ];
+    expect(sectionReach(threads, "s1")).toEqual({ projects: 2, threads: 3 });
+  });
+
+  it("is zero for a section nobody uses", () => {
+    expect(sectionReach([thread({ id: "a", projectId: "p1" })], "s1")).toEqual({
+      projects: 0,
+      threads: 0,
+    });
+  });
+});
+
+describe("next attention", () => {
+  const waiting = (id: string, projectId = "p1") =>
+    thread({ id, projectId, hasPendingInteraction: true });
+
+  it("finds the next waiting or failed thread after the current one", () => {
+    const order = [
+      thread({ id: "a", projectId: "p1" }),
+      waiting("b"),
+      thread({ id: "c", projectId: "p1" }),
+      thread({ id: "d", projectId: "p2", indicator: "unread-error" }),
+    ];
+    expect(nextAttention(order, "b", 1)?.id).toBe("d");
+    expect(nextAttention(order, "d", -1)?.id).toBe("b");
+  });
+
+  it("wraps around the ends", () => {
+    const order = [waiting("a"), thread({ id: "b", projectId: "p1" })];
+    expect(nextAttention(order, "b", 1)?.id).toBe("a");
+  });
+
+  it("starts at the top when no thread is active", () => {
+    const order = [thread({ id: "a", projectId: "p1" }), waiting("b"), waiting("c")];
+    expect(nextAttention(order, null, 1)?.id).toBe("b");
+    expect(nextAttention(order, null, -1)?.id).toBe("c");
+  });
+
+  it("returns null when nothing but the current thread needs attention", () => {
+    const order = [waiting("a"), thread({ id: "b", projectId: "p1" })];
+    expect(nextAttention(order, "a", 1)).toBeNull();
+    expect(nextAttention([thread({ id: "x", projectId: "p1" })], null, 1)).toBeNull();
+  });
+
+  it("skips archived threads", () => {
+    const order = [thread({ id: "a", projectId: "p1", hasPendingInteraction: true, isArchived: true })];
+    expect(nextAttention(order, null, 1)).toBeNull();
+  });
+
+  it("walks agents in list order, after their root", () => {
+    const blocks = groupThreads(
+      [
+        thread({ id: "root", projectId: "p1" }),
+        thread({ id: "kid", projectId: "p1", parentThreadId: "root" }),
+      ],
+      [project("p1")],
+      { archived: false, sections: [], threadSort: "newest" },
+    );
+    expect(displayOrder(blocks).map((entry) => entry.id)).toEqual(["root", "kid"]);
   });
 });

@@ -26,7 +26,20 @@ export function SelectionBar({
   busy,
   onDelete,
   onClear,
+  selecting = false,
+  onPin,
+  onArchive,
 }: {
+  /**
+   * Selection mode is on. The bar then stays even with nothing picked, so the
+   * mode always has a visible way out — it was only reachable from the header
+   * before, which now hides it behind "More".
+   */
+  selecting?: boolean;
+  /** Pin every selected root. Absent = no button. */
+  onPin?: () => void;
+  /** Archive every selected thread with its agents. Absent = no button. */
+  onArchive?: () => void;
   selectedCount: number;
   chosenCount: number;
   alsoDeletedCount: number;
@@ -41,7 +54,24 @@ export function SelectionBar({
   // the count you agreed to.
   useEffect(() => setConfirming(false), [selectedCount]);
 
-  if (selectedCount === 0) return null;
+  if (selectedCount === 0 && !selecting) return null;
+
+  if (selectedCount === 0) {
+    return (
+      <div className="flex shrink-0 items-center gap-2 border-t border-border-hairline px-3 py-2">
+        <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
+          Click threads to select them
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="rounded-md px-2 py-1 text-2xs text-muted-foreground hover:bg-sidebar-accent"
+        >
+          Done
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="shrink-0 border-t border-border-hairline px-3 py-2">
@@ -77,6 +107,28 @@ export function SelectionBar({
           <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
             {selectedCount} selected
           </span>
+          {onPin === undefined ? null : (
+            <button
+              type="button"
+              aria-label="Pin selected threads"
+              title="Pin"
+              onClick={onPin}
+              className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+            >
+              <Icon name="Pin" className="size-3.5" aria-hidden />
+            </button>
+          )}
+          {onArchive === undefined ? null : (
+            <button
+              type="button"
+              aria-label="Archive selected threads"
+              title="Archive"
+              onClick={onArchive}
+              className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+            >
+              <Icon name="Archive" className="size-3.5" aria-hidden />
+            </button>
+          )}
           <button
             type="button"
             aria-label="Delete selected threads"

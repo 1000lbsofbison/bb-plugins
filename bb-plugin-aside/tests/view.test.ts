@@ -3,7 +3,9 @@ import {
   accordionCollapse,
   allCollapsed,
   DEFAULT_VIEW,
+  isDefaultView,
   MAX_IDS,
+  resetViewSettings,
   parseViewState,
   sectionKey,
   toggleId,
@@ -93,5 +95,44 @@ describe("fold toggle", () => {
   it("ignores collapsed ids that no longer exist", () => {
     expect(allCollapsed(["a"], ["a", "gone"])).toBe(true);
     expect(allCollapsed(["a", "b"], ["a", "gone"])).toBe(false);
+  });
+});
+
+describe("focus, pinned group and reset", () => {
+  it("reads the old accordion switch as focus-follows", () => {
+    expect(parseViewState({ accordion: true }).focusFollows).toBe(true);
+    expect(parseViewState({ accordion: true, focusFollows: false }).focusFollows).toBe(false);
+    expect(parseViewState({}).focusFollows).toBe(false);
+  });
+
+  it("shows the pinned group by default and keeps it off when switched off", () => {
+    expect(DEFAULT_VIEW.pinnedGroup).toBe(true);
+    expect(parseViewState({ pinnedGroup: false }).pinnedGroup).toBe(false);
+    expect(parseViewState({ pinnedGroup: "no" }).pinnedGroup).toBe(true);
+  });
+
+  it("resets sort, display and tags but keeps what was folded by hand", () => {
+    const view = parseViewState({
+      projectSort: "name",
+      compact: true,
+      tagFilter: ["api"],
+      collapsedProjects: ["p1"],
+      collapsedSections: ["p1:s1"],
+      personalAfter: "p2",
+    });
+    const reset = resetViewSettings(view);
+    expect(reset.projectSort).toBe("manual");
+    expect(reset.compact).toBe(false);
+    expect(reset.tagFilter).toEqual([]);
+    expect(reset.collapsedProjects).toEqual(["p1"]);
+    expect(reset.collapsedSections).toEqual(["p1:s1"]);
+    expect(reset.personalAfter).toBe("p2");
+  });
+
+  it("knows a default view from a changed one", () => {
+    expect(isDefaultView(DEFAULT_VIEW)).toBe(true);
+    expect(isDefaultView({ ...DEFAULT_VIEW, collapsedProjects: ["p1"] })).toBe(true);
+    expect(isDefaultView({ ...DEFAULT_VIEW, threadSort: "state" })).toBe(false);
+    expect(isDefaultView({ ...DEFAULT_VIEW, tagFilter: ["api"] })).toBe(false);
   });
 });

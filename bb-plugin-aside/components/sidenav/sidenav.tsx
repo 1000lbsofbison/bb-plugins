@@ -18,13 +18,17 @@ import { cn } from "@/lib/utils";
 import type { rpcContract } from "@/server";
 import {
   countFamilies,
+  displayOrder,
   familyState,
   latestActivity,
   placePersonal,
   familyWaits,
   groupThreads,
   needsUser,
+  nextAttention,
+  pinnedFamilies,
   projectState,
+  sectionReach,
   sortProjects,
   splitQuiet,
   threadTitle,
@@ -36,7 +40,9 @@ import {
   accordionCollapse,
   allCollapsed,
   DEFAULT_VIEW,
+  isDefaultView,
   parseViewState,
+  resetViewSettings,
   sectionKey,
   toggleId,
   type ViewState,
@@ -53,10 +59,13 @@ import {
   type SelectionProps,
 } from "@/components/sidenav/thread-card";
 import { SelectionBar } from "@/components/sidenav/selection-bar";
-import { ViewMenu } from "@/components/sidenav/view-menu";
-import { TagFilter } from "@/components/sidenav/tag-filter";
+import { DisplayMenu, MoreMenu, SortMenu } from "@/components/sidenav/header-menus";
+import { ScopeBar } from "@/components/sidenav/scope-bar";
 import { SearchSlot } from "@/components/sidenav/search-slot";
-import { matchesQuery, normalizeQuery } from "@/lib/search";
+import { PinGlyph } from "@/components/sidenav/marks";
+import { matchesQuery, normalizeQuery, tagPrefix } from "@/lib/search";
+import { activeScopes, type ScopeKind } from "@/lib/scope";
+import { badgeColor } from "@/lib/colors";
 import {
   matchesTagFilter,
   pruneTagFilter,
@@ -69,63 +78,6 @@ import { planDeletion } from "@/lib/deletion";
 interface Section {
   id: string;
   name: string;
-}
-
-/**
- * Fold everything, unfold everything — one button, because it is one gesture
- * with two directions. The arrow shows what the next press does, not what the
- * current state is: a control that describes the state leaves you guessing what
- * pressing it will cause.
- */
-function FoldToggle({
-  collapsed,
-  onToggle,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
-  const label = collapsed ? "Expand all projects" : "Collapse all projects";
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={`${label} · ${collapsed ? "⌥⇧C" : "⌥C"}`}
-      onClick={onToggle}
-      className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-    >
-      <Icon name={collapsed ? "ChevronsDown" : "ChevronsUp"} className="size-3.5" aria-hidden />
-    </button>
-  );
-}
-
-/**
- * Selection mode is a mode, so it says so with a pressed button rather than
- * only by the checkboxes appearing — otherwise the one gesture that leaves it
- * again is a guess.
- */
-function SelectToggle({
-  selecting,
-  onToggle,
-}: {
-  selecting: boolean;
-  onToggle: () => void;
-}) {
-  const label = selecting ? "Leave selection mode" : "Select threads";
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={selecting}
-      title={label}
-      onClick={onToggle}
-      className={cn(
-        "grid size-6 place-items-center rounded-md hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-        selecting ? "bg-sidebar-accent text-foreground" : "text-muted-foreground",
-      )}
-    >
-      <Icon name="ListTodo" className="size-3.5" aria-hidden />
-    </button>
-  );
 }
 
 /**
@@ -199,6 +151,11 @@ export function Sidenav({
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [searchFocus, setSearchFocus] = useState(0);
+  // A question the notice strip asks before doing something the gesture did
+  // not say — today only "pin to keep this order".
+  const [pending, setPending] = useState<{ message: string; confirm: () => void } | null>(
+    null,
+  );
   const viewLoaded = useRef(false);
 
   const refetch = useCallback(() => {
@@ -271,9 +228,10 @@ export function Sidenav({
     [view.tagFilter, knownTags],
   );
 
-  const searching = normalizeQuery(query).length > 0;
+  // A `#` query picks tags; it is not a name search and narrows nothing itself.
+  const searching = normalizeQuery(query).length > 0 && tagPrefix(query) === null;
 
-  const blocks = useMemo(() => {
+  const { blocks, total } = useMemo(() => {
     const placed =
       personalProjectId === null || view.projectSort !== "manual"
         ? grouped
@@ -299,9 +257,14 @@ export function Sidenav({
     // The search does not spare the active project. A tag filter is a standing
     // setting you may have forgotten; a query is a question you are typing this
     // second, and a row that ignores it would read as a bad match.
-    return searching
-      ? tagged.filter((block) => matchesQuery(block.project.name, query))
-      : tagged;
+    return {
+      blocks: searching
+        ? tagged.filter((block) => matchesQuery(block.project.name, query))
+        : tagged,
+      // What the list would hold without search and tags — the "of" in the
+      // scope bar's "12 / 58".
+      total: shown.length,
+    };
   }, [
     grouped,
     personalProjectId,
@@ -318,6 +281,26 @@ export function Sidenav({
   const providerMap = useMemo(() => buildProviderMap(providers), [providers]);
   const waiting = useMemo(() => waitingThreads(threads), [threads]);
   const threadCount = useMemo(() => countFamilies(blocks), [blocks]);
+  const pinned = useMemo(
+    () => (view.pinnedGroup ? pinnedFamilies(blocks) : []),
+    [blocks, view.pinnedGroup],
+  );
+  const scopes = useMemo(
+    () => activeScopes({ query, tagFilter, archived: view.archived }),
+    [query, tagFilter, view.archived],
+  );
+  const clearScope = useCallback(
+    (kind: ScopeKind) => {
+      if (kind === "search") setQuery("");
+      if (kind === "tags") patchView({ tagFilter: [] });
+      if (kind === "archived") patchView({ archived: false });
+    },
+    [patchView],
+  );
+  const clearAllScopes = useCallback(() => {
+    setQuery("");
+    patchView({ tagFilter: [], archived: false });
+  }, [patchView]);
 
   const openThread = useCallback(
     (threadId: string, split: boolean) => {
@@ -356,6 +339,43 @@ export function Sidenav({
           report("A thread does not change projects.");
           return;
         }
+        const write = () => reorder(dragged, threadId, targetThreadId, where);
+        // Reordering pins, because the host keeps no other thread order. That
+        // used to happen silently; now the drag asks first.
+        if (!dragged.isPinned) {
+          setPending({ message: "Only pinned threads keep an order. Pin it and move it here?", confirm: write });
+          return;
+        }
+        write();
+      },
+      onNest: (threadId, parentThreadId) => {
+        const dragged = threads.find((thread) => thread.id === threadId);
+        const target = threads.find((thread) => thread.id === parentThreadId);
+        if (dragged === undefined || target === undefined) return;
+        // A thread does not change projects: `updateThread` has no projectId.
+        // We say so instead of swallowing it silently.
+        if (dragged.projectId !== target.projectId) {
+          report("A thread does not change projects.");
+          return;
+        }
+        void rpc
+          .call("thread_set_parent", { threadId, parentThreadId })
+          .then(() => setOpenChildren((current) => ({ ...current, [parentThreadId]: true })))
+          .catch((cause: unknown) =>
+            report(cause instanceof Error ? cause.message : String(cause)),
+          );
+      },
+      onDropRejected: report,
+    }),
+    [actions, openThread, report, rpc, threads],
+  );
+
+  function reorder(
+    dragged: (typeof threads)[number],
+    threadId: string,
+    targetThreadId: string,
+    where: "before" | "after",
+  ) {
         // The host keeps an order only for pinned threads. The neighbours are
         // therefore the pinned threads of the same project — without the
         // dragged one, which is moving right now.
@@ -386,28 +406,8 @@ export function Sidenav({
           .catch((cause: unknown) =>
             report(cause instanceof Error ? cause.message : String(cause)),
           );
-      },
-      onNest: (threadId, parentThreadId) => {
-        const dragged = threads.find((thread) => thread.id === threadId);
-        const target = threads.find((thread) => thread.id === parentThreadId);
-        if (dragged === undefined || target === undefined) return;
-        // A thread does not change projects: `updateThread` has no projectId.
-        // We say so instead of swallowing it silently.
-        if (dragged.projectId !== target.projectId) {
-          report("A thread does not change projects.");
-          return;
-        }
-        void rpc
-          .call("thread_set_parent", { threadId, parentThreadId })
-          .then(() => setOpenChildren((current) => ({ ...current, [parentThreadId]: true })))
-          .catch((cause: unknown) =>
-            report(cause instanceof Error ? cause.message : String(cause)),
-          );
-      },
-      onDropRejected: report,
-    }),
-    [actions, openThread, report, rpc, threads],
-  );
+  }
+
 
   const selection: SelectionProps | null = useMemo(
     () =>
@@ -509,6 +509,43 @@ export function Sidenav({
     return () => window.removeEventListener("keydown", onKey);
   }, [setFold]);
 
+  // Focus follows the active thread: when the thread on screen moves to another
+  // project, every other project folds. Only on a change, so unfolding one by
+  // hand afterwards sticks until you move again.
+  const lastFocused = useRef<string | null>(null);
+  useEffect(() => {
+    if (!view.focusFollows || activeProject === null || activeProject === undefined) return;
+    if (lastFocused.current === activeProject) return;
+    lastFocused.current = activeProject;
+    patchView({
+      collapsedProjects: accordionCollapse(
+        projects.map((project) => project.id),
+        activeProject,
+      ),
+    });
+  }, [view.focusFollows, activeProject, projects, patchView]);
+
+  // ⌥↓ / ⌥↑ jump to the next thread that waits for you or failed, across
+  // projects and into folded ones. `event.code` for the same reason as ⌥C.
+  const order = useMemo(() => displayOrder(blocks), [blocks]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.altKey || event.metaKey || event.ctrlKey) return;
+      if (event.code !== "ArrowDown" && event.code !== "ArrowUp") return;
+      const next = nextAttention(order, activeThreadId, event.code === "ArrowDown" ? 1 : -1);
+      if (next === null) return;
+      event.preventDefault();
+      if (view.collapsedProjects.includes(next.projectId)) {
+        patchView({
+          collapsedProjects: view.collapsedProjects.filter((id) => id !== next.projectId),
+        });
+      }
+      openThread(next.id, false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [order, activeThreadId, view.collapsedProjects, patchView, openThread]);
+
   if (status === "loading") return null;
 
   return (
@@ -520,24 +557,33 @@ export function Sidenav({
             thing than the identical count on a project. */}
         <RowCount count={threadCount} open />
         <span className="flex-1" />
-        <TagFilter
-          tags={knownTags}
-          counts={counts}
-          active={tagFilter}
-          onToggle={(tag) => patchView({ tagFilter: toggleId(tagFilter, tag) })}
-          onClear={() => patchView({ tagFilter: [] })}
-        />
+        {/* Three zones: find · order and display · actions. */}
         <SearchToggle
           open={searchOpen}
-          active={searching}
+          active={searching || tagFilter.length > 0}
           onToggle={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
         />
-        <SelectToggle
+        <span aria-hidden className="mx-0.5 h-3.5 w-px bg-border-hairline" />
+        <SortMenu view={view} onPatch={patchView} />
+        <DisplayMenu view={view} onPatch={patchView} />
+        <span aria-hidden className="mx-0.5 h-3.5 w-px bg-border-hairline" />
+        <MoreMenu
           selecting={selecting}
-          onToggle={() => (selecting ? leaveSelection() : setSelecting(true))}
+          filterCount={scopes.length}
+          viewIsDefault={isDefaultView(view)}
+          onCollapseAll={() => setFold(true)}
+          onExpandAll={() => setFold(false)}
+          onToggleSelecting={() => (selecting ? leaveSelection() : setSelecting(true))}
+          onClearFilters={clearAllScopes}
+          onResetView={() => {
+            setQuery("");
+            setView((current) => {
+              const next = resetViewSettings(current);
+              if (viewLoaded.current) void rpc.call("view_set", { view: next });
+              return next;
+            });
+          }}
         />
-        <FoldToggle collapsed={everythingCollapsed} onToggle={toggleFold} />
-        <ViewMenu view={view} onPatch={patchView} />
       </div>
 
       {searchOpen ? (
@@ -547,7 +593,42 @@ export function Sidenav({
           focusTick={searchFocus}
           onQuery={setQuery}
           onClose={closeSearch}
+          knownTags={knownTags}
+          tagCounts={counts}
+          activeTags={tagFilter}
+          onToggleTag={(tag) => patchView({ tagFilter: toggleId(tagFilter, tag) })}
         />
+      ) : null}
+
+      <ScopeBar
+        chips={scopes}
+        shown={blocks.length}
+        total={total}
+        onClear={clearScope}
+        onClearAll={clearAllScopes}
+      />
+
+      {pending !== null ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border-hairline px-3 py-1.5 text-2xs text-muted-foreground">
+          <span className="min-w-0 flex-1">{pending.message}</span>
+          <button
+            type="button"
+            onClick={() => {
+              pending.confirm();
+              setPending(null);
+            }}
+            className="rounded-md bg-sidebar-accent px-2 py-0.5 text-foreground hover:opacity-90"
+          >
+            Pin and move
+          </button>
+          <button
+            type="button"
+            onClick={() => setPending(null)}
+            className="rounded-md px-2 py-0.5 hover:bg-sidebar-accent"
+          >
+            Cancel
+          </button>
+        </div>
       ) : null}
 
       {waiting.length > 0 ? (
@@ -580,6 +661,45 @@ export function Sidenav({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
+        {pinned.length > 0 ? (
+          <div className="mb-2 border-b border-border-hairline pb-1.5">
+            <button
+              type="button"
+              aria-expanded={!view.pinnedCollapsed}
+              onClick={() => patchView({ pinnedCollapsed: !view.pinnedCollapsed })}
+              className="flex h-6 w-full items-center gap-1.5 rounded-md px-2 text-left hover:bg-sidebar-accent/60"
+            >
+              <PinGlyph className="text-muted-foreground" />
+              <span className="text-2xs uppercase tracking-wider text-muted-foreground/70">
+                Pinned
+              </span>
+              <RowCount count={pinned.length} open={!view.pinnedCollapsed} />
+            </button>
+            {view.pinnedCollapsed
+              ? null
+              : pinned.map(({ family, project }) => (
+                  <ThreadCard
+                    key={`pinned:${family.root.id}`}
+                    family={{ root: family.root, children: [] }}
+                    providers={providerMap}
+                    sections={sections}
+                    activeThreadId={activeThreadId}
+                    childrenOpen={false}
+                    compact
+                    now={now}
+                    selection={selection}
+                    renaming={false}
+                    onStartRename={(threadId) => setRenaming({ kind: "thread", id: threadId })}
+                    onCancelRename={() => setRenaming(null)}
+                    callbacks={callbacks}
+                    pinnedIn={{
+                      name: project.name,
+                      color: badgeColor(project.id, colors[project.id] ?? null),
+                    }}
+                  />
+                ))}
+          </div>
+        ) : null}
         {blocks.map((block) => {
           const collapsed = view.collapsedProjects.includes(block.project.id);
           const waitingHere = block.families.filter(familyWaits).length;
@@ -610,6 +730,25 @@ export function Sidenav({
                     ),
                   })
                 }
+                sectionsCollapsed={(() => {
+                  const keys = block.blocks
+                    .filter((entry) => entry.section !== null)
+                    .map((entry) => sectionKey(block.project.id, entry.section!.id));
+                  return keys.length === 0
+                    ? null
+                    : keys.every((key) => view.collapsedSections.includes(key));
+                })()}
+                onToggleSections={() => {
+                  const keys = block.blocks
+                    .filter((entry) => entry.section !== null)
+                    .map((entry) => sectionKey(block.project.id, entry.section!.id));
+                  const allFolded = keys.every((key) => view.collapsedSections.includes(key));
+                  patchView({
+                    collapsedSections: allFolded
+                      ? view.collapsedSections.filter((key) => !keys.includes(key))
+                      : [...new Set([...view.collapsedSections, ...keys])],
+                  });
+                }}
                 onStartRename={() => setRenaming({ kind: "project", id: block.project.id })}
                 onCancelRename={() => setRenaming(null)}
                 onRename={(name) => {
@@ -647,7 +786,7 @@ export function Sidenav({
                   // computed order, and a drag inside it would write something
                   // nobody can see.
                   if (view.projectSort !== "manual") {
-                    report("To reorder by dragging: View → Projects → Manual.");
+                    report("To reorder by dragging: Sort → Projects → Manual.");
                     return;
                   }
                   const before = position === "before";
@@ -721,11 +860,8 @@ export function Sidenav({
                             renaming?.kind === "section" &&
                             renaming.id === sectionBlock.section.id
                           }
-                          threadCount={
-                            threads.filter(
-                              (thread) => thread.sectionId === sectionBlock.section?.id,
-                            ).length
-                          }
+                          threadCount={sectionReach(threads, sectionBlock.section.id).threads}
+                          projectCount={sectionReach(threads, sectionBlock.section.id).projects}
                           onToggle={() =>
                             patchView({
                               collapsedSections: toggleId(view.collapsedSections, key),
@@ -737,10 +873,19 @@ export function Sidenav({
                           onCancelRename={() => setRenaming(null)}
                           onRename={(name) => {
                             setRenaming(null);
-                            void rpc.call("section_rename", {
-                              sectionId: sectionBlock.section!.id,
-                              name,
-                            });
+                            const reach = sectionReach(threads, sectionBlock.section!.id);
+                            void rpc
+                              .call("section_rename", {
+                                sectionId: sectionBlock.section!.id,
+                                name,
+                              })
+                              .then(() => {
+                                // A section belongs to no project: say that the
+                                // name changed everywhere it is used.
+                                if (reach.projects > 1) {
+                                  report(`Section renamed in ${reach.projects} projects.`);
+                                }
+                              });
                           }}
                           onDissolve={() => {
                             void rpc
@@ -778,6 +923,31 @@ export function Sidenav({
         busy={deleting}
         onDelete={deleteSelected}
         onClear={leaveSelection}
+        selecting={selecting}
+        onPin={() => {
+          const ids = [...selected];
+          void Promise.all(ids.map((id) => actions.setPinned(id, true))).then(() => {
+            leaveSelection();
+            report(`${ids.length} pinned.`);
+          });
+        }}
+        onArchive={() => {
+          // Archive covers a thread's agents too, so only the outermost picks
+          // are sent — archiving a child after its parent would be a no-op
+          // that still reports as an error.
+          const picked = new Set(selected);
+          const roots = [...picked].filter((id) => {
+            let parent = threads.find((thread) => thread.id === id)?.parentThreadId ?? null;
+            while (parent !== null) {
+              if (picked.has(parent)) return false;
+              parent = threads.find((thread) => thread.id === parent)?.parentThreadId ?? null;
+            }
+            return true;
+          });
+          for (const id of roots) actions.archive(id);
+          leaveSelection();
+          report(`${roots.length} archived.`);
+        }}
       />
     </div>
   );
