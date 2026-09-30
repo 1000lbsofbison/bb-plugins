@@ -22,7 +22,11 @@ import {
   type Graph,
   type RunState,
 } from "./lib/graph";
-import { farewellMessage, orphanedWorkers } from "./lib/orphans";
+import {
+  farewellMessage,
+  interruptibleWorkers,
+  orphanedWorkers,
+} from "./lib/orphans";
 import { compileGraph, GuardStop, type RuntimeHost } from "./lib/runtime";
 import {
   describeAttempt,
@@ -105,7 +109,7 @@ const runSchema = z.object({
   threadId: z.string().nullable(),
   projectId: z.string().nullable(),
   input: z.string(),
-  status: z.enum(["running", "waiting-human", "done", "failed", "stopped"]),
+  status: z.enum(["running", "stopping", "waiting-human", "done", "failed", "stopped"]),
   state: runStateSchema,
   error: z.string().nullable(),
   createdAt: z.number(),
@@ -373,6 +377,31 @@ export default function graphStudio(bb: BbPluginApi) {
   >();
   /** Runs whose stop was requested; checked between nodes. */
   const stopping = new Set<string>();
+  /**
+   * The waits a run currently holds, keyed by run, aborted when its stop is
+   * requested. `threads.wait` honours the signal on its next poll — 250 ms in
+   * practice — so a stop reaches every waiting node almost immediately,
+   * whatever the six-hour timeout of the wait itself says. Without this, a
+   * worker that ignores being interrupted would hold its node hostage until
+   * the timeout.
+   */
+  const stopWaiters = new Map<string, Set<AbortController>>();
+  const trackStop = (runId: string): AbortController => {
+    let waiters = stopWaiters.get(runId);
+    if (!waiters) {
+      waiters = new Set();
+      stopWaiters.set(runId, waiters);
+    }
+    const controller = new AbortController();
+    waiters.add(controller);
+    return controller;
+  };
+  const untrackStop = (runId: string, controller: AbortController) => {
+    const waiters = stopWaiters.get(runId);
+    if (!waiters) return;
+    waiters.delete(controller);
+    if (waiters.size === 0) stopWaiters.delete(runId);
+  };
   /**
    * Approvals posted into the thread that started the run, keyed by run. Only
    * these owe the chat a closing note when they are settled elsewhere. In
@@ -656,15 +685,39 @@ export default function graphStudio(bb: BbPluginApi) {
         return child.id;
       },
       async awaitThread(threadId) {
+        if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
         // `wait` is race-free: it resolves immediately if the thread already
         // reached the status, so a fast child cannot slip past a listener.
-        await bb.sdk.threads.wait({
-          threadId,
-          status: "idle",
-          timeoutMs: 1000 * 60 * 60 * 6,
-        });
-        const { output } = await bb.sdk.threads.output({ threadId });
-        if (output == null || output.trim() === "") {
+        // The six hours are the ceiling, not the plan: the signal aborts the
+        // wait the moment the run's stop is requested, so a stop is felt here
+        // within moments instead of hiding behind the whole wait. That is the
+        // belt to `requestStop`'s braces — it interrupts the worker itself,
+        // but a thread that ignores even that must not hold the run hostage.
+        const controller = trackStop(runId);
+        let output: string;
+        try {
+          await bb.sdk.threads.wait({
+            threadId,
+            status: "idle",
+            timeoutMs: 1000 * 60 * 60 * 6,
+            signal: controller.signal,
+          });
+          // Idle can be the interruption's doing: a worker stopped mid-turn
+          // is idle with a half-finished answer. Say the stop rather than
+          // collect that as a result.
+          if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+          output = (await bb.sdk.threads.output({ threadId })).output ?? "";
+        } catch (cause) {
+          // An abort surfaces as whatever the transport makes of it; what
+          // matters is that we asked for it, not how it reads.
+          if (controller.signal.aborted) {
+            throw new GuardStop("The run was stopped.");
+          }
+          throw cause;
+        } finally {
+          untrackStop(runId, controller);
+        }
+        if (output.trim() === "") {
           throw new Error(`Thread ${threadId} returned no result.`);
         }
         return output;
@@ -885,6 +938,19 @@ export default function graphStudio(bb: BbPluginApi) {
         (task) => task.interrupts ?? [],
       );
       if (interrupts.length > 0) {
+        // A stop that arrived while the graph was finding its interrupt is
+        // still a stop: parking the run at a question nobody will answer
+        // would strand it in `waiting-human` despite the request.
+        if (stopping.has(runId)) {
+          store.updateRun(
+            runId,
+            { status: "stopped", state: result, error: null },
+            Date.now(),
+          );
+          publish();
+          await farewellWorkers(runId, "stopped", null);
+          return;
+        }
         const value = interrupts[0]!.value as {
           nodeId: string;
           label: string;
@@ -926,6 +992,7 @@ export default function graphStudio(bb: BbPluginApi) {
     } finally {
       unwatchActivity(runId);
       stopping.delete(runId);
+      stopWaiters.delete(runId);
       publish();
     }
   }
@@ -1033,8 +1100,12 @@ export default function graphStudio(bb: BbPluginApi) {
   function rerunFrom(runId: string, checkpointId: string) {
     const row = store.getRun(runId);
     if (!row) throw new Error(`No run ${runId}.`);
-    if (row.status === "running") {
-      throw new Error("That run is in progress. Stop it first, then retry.");
+    if (row.status === "running" || row.status === "stopping") {
+      throw new Error(
+        row.status === "stopping"
+          ? "That run is still stopping. Give it a moment, then retry."
+          : "That run is in progress. Stop it first, then retry.",
+      );
     }
     stopping.delete(runId);
     pending.delete(runId);
@@ -1049,10 +1120,25 @@ export default function graphStudio(bb: BbPluginApi) {
     void drive(runId, undefined, checkpointId);
   }
 
+  /**
+   * The user's stop, made effective immediately.
+   *
+   * Between nodes the flag alone is enough — the next spawn refuses. But a
+   * run's workers can each sit in a turn of their own, and waiting for those
+   * to finish would keep the run `running` (and the workers burning) for as
+   * long as the longest of them. So a stop does three things in one breath:
+   * it marks the run `stopping` — visible in the panel, and persisted, so a
+   * reload honours the wish instead of resurrecting the run —, it aborts the
+   * waits the run's nodes are held in, and it interrupts the workers
+   * themselves. What is still in flight then ends as a failed node, and
+   * `drive`'s catch settles the run as `stopped`.
+   */
   function requestStop(runId: string) {
     stopping.add(runId);
+    for (const controller of stopWaiters.get(runId) ?? []) controller.abort();
     const row = store.getRun(runId);
-    if (row && row.status === "waiting-human") {
+    if (!row) return;
+    if (row.status === "waiting-human") {
       pending.delete(runId);
       settleAnnouncement(runId, { kind: "stopped" });
       store.updateRun(
@@ -1064,7 +1150,43 @@ export default function graphStudio(bb: BbPluginApi) {
       // Nothing is driving this run any more, so nobody else will say it.
       // A run that is still `running` reaches `drive`'s catch instead.
       void farewellWorkers(runId, "stopped", null);
+      return;
     }
+    if (row.status === "running" || row.status === "stopping") {
+      store.updateRun(
+        runId,
+        { status: "stopping", state: row.state, error: row.error },
+        Date.now(),
+      );
+      publish();
+      void interruptWorkers(runId);
+    }
+  }
+
+  /**
+   * Interrupt the workers a run has in flight, so a stop reaches them
+   * mid-turn instead of waiting out work nobody will collect. `threads.stop`
+   * cuts the active turn and stops the thread's runtime; the goodbye that
+   * `farewellWorkers` sends afterwards still reaches the thread, so a worker
+   * that had something worth keeping can write it down. Best effort per
+   * thread: a worker that cannot be interrupted must not block the stop —
+   * the aborted waits and the between-nodes flag are what make it certain.
+   */
+  async function interruptWorkers(runId: string) {
+    await Promise.all(
+      interruptibleWorkers(store.listNodeRuns(runId)).map(async (threadId) => {
+        try {
+          await bb.sdk.threads.stop({ threadId });
+          bb.log.info(`[run ${runId}] Interrupted worker ${threadId}.`);
+        } catch (cause) {
+          bb.log.warn(
+            `[run ${runId}] Could not interrupt worker ${threadId}: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          );
+        }
+      }),
+    );
   }
 
   /**
@@ -1705,11 +1827,28 @@ export default function graphStudio(bb: BbPluginApi) {
 
   // A plugin reload leaves runs marked `running` with nobody driving them.
   // The checkpointer holds their position, so they can simply be resumed.
+  // Runs marked `stopping` are the other case: their stop was requested but
+  // not finished when the plugin went down. A reload is not a change of mind
+  // — the wish is honoured by settling them as `stopped` and interrupting
+  // whatever of their workers survived the reload. The checkpoint stays, so
+  // `rerunFrom` remains possible afterwards.
   bb.background.service("resume-orphans", {
     // Resumes once on load, then stays parked until the host aborts. A
     // service that returns early is reported as stopped, so the wait is what
     // keeps the plugin's status honest.
     start(signal: AbortSignal) {
+      for (const row of store.listRunsByStatus("stopping")) {
+        bb.log.info(`Settling stopped run ${row.id} after reload.`);
+        store.updateRun(
+          row.id,
+          { status: "stopped", state: row.state, error: row.error },
+          Date.now(),
+        );
+        publish();
+        void interruptWorkers(row.id).then(() =>
+          farewellWorkers(row.id, "stopped", row.error),
+        );
+      }
       for (const row of store.listRunsByStatus("running")) {
         bb.log.info(`Resuming run ${row.id} after reload.`);
         void drive(row.id);

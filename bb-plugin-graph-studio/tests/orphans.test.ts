@@ -3,7 +3,11 @@
 // questions into a run that no longer accepted answers, and nobody told it.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { farewellMessage, orphanedWorkers } from "../lib/orphans";
+import {
+  farewellMessage,
+  interruptibleWorkers,
+  orphanedWorkers,
+} from "../lib/orphans";
 import type { NodeRunRow } from "../lib/store";
 
 function nodeRun(
@@ -82,6 +86,40 @@ describe("orphanedWorkers", () => {
         [{ nodeId: "talk", threadId: "thr_talk" }],
       ),
     ).toEqual(["thr_talk", "thr_b"]);
+  });
+});
+
+describe("interruptibleWorkers", () => {
+  it("names the worker of every running node", () => {
+    expect(
+      interruptibleWorkers([
+        nodeRun("a", "running", "thr_a"),
+        nodeRun("b", "running", "thr_b"),
+      ]),
+    ).toEqual(["thr_a", "thr_b"]);
+  });
+
+  /** Finished and failed nodes have no worker mid-turn any more. */
+  it("leaves finished and failed attempts alone", () => {
+    expect(
+      interruptibleWorkers([
+        nodeRun("a", "done", "thr_a"),
+        nodeRun("b", "failed", "thr_b"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("skips a running row that has no thread yet", () => {
+    expect(interruptibleWorkers([nodeRun("a", "running", null)])).toEqual([]);
+  });
+
+  it("names each thread once, however many attempts share it", () => {
+    expect(
+      interruptibleWorkers([
+        nodeRun("a", "running", "thr_a"),
+        nodeRun("a2", "running", "thr_a"),
+      ]),
+    ).toEqual(["thr_a"]);
   });
 });
 

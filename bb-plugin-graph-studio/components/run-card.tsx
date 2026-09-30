@@ -63,7 +63,9 @@ export function GraphRunCard({ attributes }: PluginMessageDirectiveProps) {
   const branches = useMemo(() => (run ? fanOutProgress(run.graph, run.state) : {}), [run]);
   const travelled = useMemo(() => travelledEdges(run ?? null), [run]);
   const activity = useMemo(() => (run ? activityByNode(run.nodeRuns) : {}), [run]);
-  const now = useNow(run?.status === "running");
+  // The clock ticks while something is still in flight — including the
+  // unwind after a stop, which is work ending, not ended.
+  const now = useNow(run?.status === "running" || run?.status === "stopping");
 
   if (!runId) {
     return (

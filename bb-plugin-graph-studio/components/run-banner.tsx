@@ -30,6 +30,9 @@ function summarise(run: RunDto): { line: string; waiting: boolean } {
   if (run.pendingQuestion) {
     return { line: firstLine(run.pendingQuestion.question), waiting: true };
   }
+  if (run.status === "stopping") {
+    return { line: "stopping", waiting: false };
+  }
   const running = run.nodeRuns.find((node) => node.status === "running");
   const label = running
     ? (run.graph.nodes.find((node) => node.id === running.nodeId)?.label ??
@@ -61,7 +64,10 @@ export function GraphStudioRunBanner() {
   useRealtime("graph-studio", refetch);
 
   const active = runs.filter(
-    (run) => run.status === "running" || run.status === "waiting-human",
+    (run) =>
+      run.status === "running" ||
+      run.status === "stopping" ||
+      run.status === "waiting-human",
   );
   if (active.length === 0) return null;
 

@@ -47,6 +47,24 @@ export function orphanedWorkers(
 }
 
 /**
+ * The threads a run has mid-turn right now: every `running` node_run with a
+ * worker attached, deduplicated. The mirror image of `orphanedWorkers`: that
+ * one asks "who is left behind when the run is over?", this one asks "who is
+ * still working?" — a stop wants to interrupt the second and owes a goodbye
+ * only to the first. A dialogue thread parked at an interrupt is idle, not
+ * working; interrupting it is the farewell's business, not this one's.
+ */
+export function interruptibleWorkers(nodeRuns: NodeRunRow[]): string[] {
+  const threads = new Set<string>();
+  for (const row of nodeRuns) {
+    if (row.status === "running" && row.childThreadId) {
+      threads.add(row.childThreadId);
+    }
+  }
+  return [...threads];
+}
+
+/**
  * What an orphaned worker is told. In English like every other prompt the
  * worker sees, and explicit about the one thing it cannot know: nobody is
  * listening any more. The message asks for a final write-up rather than

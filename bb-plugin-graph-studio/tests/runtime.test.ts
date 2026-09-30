@@ -327,6 +327,87 @@ describe("runtime", () => {
     expect(calls).toBe(2);
   });
 
+  /**
+   * A stop is a decision about the run, not a flaky attempt. Without the
+   * `retryOn` exemption the policy would burn the whole backoff — three
+   * attempts at growing intervals — on a result that is already decided.
+   */
+  it("does not retry a stop, whatever the attempt budget", async () => {
+    const graph = graphSchema.parse({
+      id: "stopping",
+      name: "Stopping",
+      nodes: [{ id: "a", label: "A", prompt: "a", maxAttempts: 3 }],
+      edges: [
+        { from: START_NODE, to: "a" },
+        { from: "a", to: END_NODE },
+      ],
+    });
+    const starts: string[] = [];
+    const { host } = fakeHost({});
+    const stopped: RuntimeHost = {
+      ...host,
+      async onNodeStart(nodeId) {
+        starts.push(nodeId);
+        return `run-${starts.length}`;
+      },
+      async awaitThread() {
+        throw new GuardStop("The run was stopped.");
+      },
+    };
+    await expect(
+      compileGraph(graph, stopped).invoke(emptyRunState("T"), {
+        recursionLimit: 20,
+      }),
+    ).rejects.toThrow("The run was stopped.");
+    expect(starts).toEqual(["a"]);
+  });
+
+  /**
+   * The same rule for the other way of retrying: a node that routes its
+   * failures must not route a stop. Without the exemption the stop would
+   * become an error in the state, the failure edge would carry the run on to
+   * the next node, and the next spawn would refuse — the run would end
+   * stopped eventually, but only after pretending the stop was a failure.
+   */
+  it("ends the run when a routing node is stopped, rather than routing the stop", async () => {
+    const graph = graphSchema.parse({
+      id: "routed-stop",
+      name: "Routed Stop",
+      nodes: [
+        {
+          id: "primary",
+          label: "Primary",
+          prompt: "a",
+          maxAttempts: 2,
+          onError: "route",
+        },
+        { id: "rescue", label: "Rescue", prompt: "b", maxAttempts: 1 },
+      ],
+      edges: [
+        { from: START_NODE, to: "primary" },
+        { from: "primary", to: "rescue", when: { source: "output", key: "", op: "failed", value: "" } },
+        { from: "primary", to: END_NODE },
+        { from: "rescue", to: END_NODE },
+      ],
+    });
+    const { host, spawned } = fakeHost({});
+    const stopped: RuntimeHost = {
+      ...host,
+      async awaitThread(threadId) {
+        if (threadId.startsWith("thr_primary")) {
+          throw new GuardStop("The run was stopped.");
+        }
+        return host.awaitThread(threadId);
+      },
+    };
+    await expect(
+      compileGraph(graph, stopped).invoke(emptyRunState("T"), {
+        recursionLimit: 20,
+      }),
+    ).rejects.toThrow("The run was stopped.");
+    expect(spawned).toEqual(["primary"]);
+  });
+
   it("never retries a human node, because interrupt throws by design", async () => {
     const graph = graphSchema.parse({
       id: "gate2",

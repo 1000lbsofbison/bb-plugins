@@ -87,6 +87,7 @@ export const MIGRATIONS = [
 
 export type RunStatus =
   | "running"
+  | "stopping"
   | "waiting-human"
   | "done"
   | "failed"

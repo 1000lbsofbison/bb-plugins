@@ -241,9 +241,19 @@ export function compileGraph(
     // is what a retry policy *is* — so a node whose last attempt must return
     // rather than throw cannot hand the counting over. The two ways of
     // retrying therefore never apply to the same node.
+    //
+    // `GuardStop` is excluded from the retry on purpose: a stop (or a guard
+    // limit) is the run asking to end, not a flaky attempt. Retrying it would
+    // burn the backoff delays — three attempts at growing intervals — on a
+    // result that is already decided.
     const retryPolicy =
       node.kind === "agent" && node.maxAttempts > 1 && node.onError !== "route"
-        ? { maxAttempts: node.maxAttempts, initialInterval: 1_000, jitter: true }
+        ? {
+            maxAttempts: node.maxAttempts,
+            initialInterval: 1_000,
+            jitter: true,
+            retryOn: (cause: unknown) => !(cause instanceof GuardStop),
+          }
         : undefined;
 
     builder.addNode(node.id, async (state: State) => {
@@ -395,6 +405,10 @@ export function compileGraph(
             output: null,
             error: message,
           });
+          // A stop is recorded like any failed attempt above, but it is not a
+          // failure to route around: the run asked to end, so no failure edge
+          // applies and the error propagates to the run.
+          if (cause instanceof GuardStop) throw cause;
           if (node.onError !== "route") throw cause;
           // Same bargain as an agent node, minus the retry: a dialogue is a
           // conversation with a person in it, and starting it over from the
@@ -507,6 +521,9 @@ export function compileGraph(
           return await attempt();
         } catch (cause) {
           if (isGraphBubbleUp(cause)) throw cause;
+          // Same as in the dialogue node above: a stop ends the run, it is not
+          // a failure this node may retry or route around.
+          if (cause instanceof GuardStop) throw cause;
           const message = cause instanceof Error ? cause.message : String(cause);
           // The empty string is how this state says "did not fail", so a
           // failure without a message must not be recorded as one.

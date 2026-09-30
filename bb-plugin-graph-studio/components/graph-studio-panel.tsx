@@ -8,7 +8,7 @@ import {
   useRpc,
 } from "@get-bb/plugin-sdk/app";
 import type { NodeRunDto, RunDto, rpcContract } from "../server";
-import { KIND_LABEL, edgeKey, fanOutProgress, type Graph } from "../lib/graph";
+import { KIND_LABEL, START_NODE, edgeKey, fanOutProgress, type Graph } from "../lib/graph";
 import { describeCost, runCommand, runTotal } from "../lib/describe";
 import { activityByNode } from "../lib/activity";
 import { suggestGraphs } from "../lib/suggest";
@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 
 export const RUN_STATUS: Record<RunDto["status"], string> = {
   running: "running",
+  stopping: "stopping…",
   "waiting-human": "waiting for you",
   done: "done",
   failed: "failed",
@@ -69,15 +70,25 @@ export function useNow(active: boolean): number {
   return now;
 }
 
-/** Edges between consecutive completed nodes — the path the run actually took. */
+/**
+ * Edges the run has actually taken — highlighted on the canvas.
+ *
+ * A node_run row is written the moment a node starts, so "the target has an
+ * attempt" is the honest signal that an edge fired. The start order is not:
+ * parallel branches begin in one breath, and reading it as a chain drew
+ * highlighted edges between siblings that were never connected — a split
+ * looked like it fed one collector while the others worked unattached. The
+ * source needs an attempt too, so a diamond reaching its join over one
+ * branch does not light the other branch's way in.
+ */
 export function travelledEdges(run: RunDto | null): Set<string> {
   if (!run) return new Set();
-  const order = [...run.nodeRuns]
-    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
-    .map((nodeRun) => nodeRun.nodeId);
+  const attempted = new Set(run.nodeRuns.map((nodeRun) => nodeRun.nodeId));
   const keys = new Set<string>();
-  for (let index = 1; index < order.length; index += 1) {
-    keys.add(edgeKey({ from: order[index - 1]!, to: order[index]! }));
+  for (const edge of run.graph.edges) {
+    if (!attempted.has(edge.to)) continue;
+    if (edge.from !== START_NODE && !attempted.has(edge.from)) continue;
+    keys.add(edgeKey(edge));
   }
   return keys;
 }
@@ -382,7 +393,7 @@ function RunView({
   }, [run, branches]);
   const travelled = useMemo(() => travelledEdges(run), [run]);
   const activity = useMemo(() => activityByNode(run.nodeRuns), [run]);
-  const now = useNow(run.status === "running");
+  const now = useNow(run.status === "running" || run.status === "stopping");
   const doneCount = run.nodeRuns.filter((node) => node.status === "done").length;
   const total = runTotal(run.nodeRuns);
 
@@ -447,8 +458,9 @@ function RunView({
   const timeline = (
     <RunTimeline
       nodeRuns={run.nodeRuns}
-      // Restart points only for a run that is not moving.
-      checkpoints={run.status === "running" ? [] : checkpoints}
+      // Restart points only for a run that is not moving — and a run that
+      // is stopping is still moving: its nodes are unwinding.
+      checkpoints={run.status === "running" || run.status === "stopping" ? [] : checkpoints}
       label={label}
       selectedAttemptId={focusAttempt}
       onSelectAttempt={(attempt: NodeRunDto) => {
@@ -464,6 +476,13 @@ function RunView({
     run.status === "running" || run.status === "waiting-human" ? (
       <Button size="sm" variant="destructive" className="h-7" disabled={pending} onClick={onStop}>
         Stop the run
+      </Button>
+    ) : run.status === "stopping" ? (
+      // Not a second stop button on purpose: the stop is already on its way
+      // through the workers, and a button that does nothing again would say
+      // the first click did nothing either.
+      <Button size="sm" variant="destructive" className="h-7" disabled>
+        Stopping…
       </Button>
     ) : null;
 
@@ -653,7 +672,10 @@ function Library({
   // Runs that want attention come first: a run waiting for an answer that
   // sits at the bottom of a list is a run that quietly stops.
   const activeRuns = runs.filter(
-    (entry) => entry.status === "running" || entry.status === "waiting-human",
+    (entry) =>
+      entry.status === "running" ||
+      entry.status === "stopping" ||
+      entry.status === "waiting-human",
   );
 
   return (
@@ -1054,7 +1076,11 @@ export function GraphStudioPanel({
   const openRunId = openRun?.id ?? null;
   const openRunStatus = openRun?.status ?? null;
   useEffect(() => {
-    if (!openRunId || openRunStatus === "running") {
+    if (
+      !openRunId ||
+      openRunStatus === "running" ||
+      openRunStatus === "stopping"
+    ) {
       setCheckpoints([]);
       return;
     }

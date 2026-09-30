@@ -10,6 +10,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { graphSchema, type Graph } from "../lib/graph";
 import { GraphCanvas, colorLightness } from "../components/graph-canvas";
+import { travelledEdges } from "../components/graph-studio-panel";
 
 afterEach(cleanup);
 
@@ -270,5 +271,98 @@ describe("user colour", () => {
   it("draws no colour when none is chosen", () => {
     render(<GraphCanvas graph={coloured(null)} />);
     expect(screen.queryByTestId("node-color")).toBeNull();
+  });
+});
+
+/**
+ * Which edges the canvas highlights as taken. `travelledEdges` reads only the
+ * node ids of the attempts; the rest of the DTO is irrelevant here.
+ */
+const runOver = (graph: Graph, nodeIds: string[]) =>
+  ({
+    graph,
+    nodeRuns: nodeIds.map((nodeId) => ({ nodeId })),
+  }) as unknown as Parameters<typeof travelledEdges>[0];
+
+describe("travelledEdges", () => {
+  it("highlights every edge a fan-out actually took, in whatever order the attempts started", () => {
+    // The daily-briefing shape: a split feeding several collectors that all
+    // begin in one breath. A chain reading of the start order used to light
+    // only the first branch — a split that looked like it fed one collector.
+    const fanOut = graphSchema.parse({
+      id: "fan",
+      name: "Fan Out",
+      nodes: [
+        { id: "split", label: "Split", kind: "agent", prompt: "x" },
+        { id: "a", label: "A", kind: "agent", prompt: "x" },
+        { id: "b", label: "B", kind: "agent", prompt: "x" },
+        { id: "c", label: "C", kind: "agent", prompt: "x" },
+      ],
+      edges: [
+        { from: START, to: "split" },
+        { from: "split", to: "a" },
+        { from: "split", to: "b" },
+        { from: "split", to: "c" },
+        { from: "a", to: END },
+        { from: "b", to: END },
+        { from: "c", to: END },
+      ],
+    });
+    // Deliberately not in start order: the collectors race.
+    const keys = travelledEdges(runOver(fanOut, ["b", "split", "c", "a"]));
+    expect([...keys]).toEqual(
+      expect.arrayContaining(["__start__→split", "split→a", "split→b", "split→c"]),
+    );
+    expect(keys.size).toBe(4);
+  });
+
+  it("leaves the branch dim whose node never started", () => {
+    const fanOut = graphSchema.parse({
+      id: "fan-partial",
+      name: "Fan Out Partial",
+      nodes: [
+        { id: "split", label: "Split", kind: "agent", prompt: "x" },
+        { id: "a", label: "A", kind: "agent", prompt: "x" },
+        { id: "b", label: "B", kind: "agent", prompt: "x" },
+      ],
+      edges: [
+        { from: START, to: "split" },
+        { from: "split", to: "a" },
+        { from: "split", to: "b" },
+        { from: "a", to: END },
+        { from: "b", to: END },
+      ],
+    });
+    const keys = travelledEdges(runOver(fanOut, ["split", "a"]));
+    expect(keys.has("split→a")).toBe(true);
+    expect(keys.has("split→b")).toBe(false);
+  });
+
+  it("does not light the untaken branch of a diamond reaching its join", () => {
+    // The join ran, but over one branch only: the other branch's edge into
+    // the join must stay dim, or the canvas would claim a path nobody took.
+    const diamond = graphSchema.parse({
+      id: "diamond",
+      name: "Diamond",
+      nodes: [
+        { id: "a", label: "A", kind: "agent", prompt: "x" },
+        { id: "b", label: "B", kind: "agent", prompt: "x" },
+        { id: "c", label: "C", kind: "agent", prompt: "x" },
+        { id: "join", label: "Join", kind: "agent", prompt: "x" },
+      ],
+      edges: [
+        { from: START, to: "a" },
+        { from: "a", to: "b" },
+        { from: "a", to: "c" },
+        { from: "b", to: "join" },
+        { from: "c", to: "join" },
+        { from: "join", to: END },
+      ],
+    });
+    const keys = travelledEdges(runOver(diamond, ["a", "b", "join"]));
+    expect(keys.has("a→b")).toBe(true);
+    expect(keys.has("b→join")).toBe(true);
+    expect(keys.has("a→c")).toBe(false);
+    expect(keys.has("c→join")).toBe(false);
   });
 });
