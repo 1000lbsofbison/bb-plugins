@@ -16,11 +16,12 @@ import { GraphPicker } from "./graph-picker";
 import { RunTimeline } from "./run-timeline";
 import { FullscreenLayer } from "./fullscreen";
 import { GraphCanvas, CanvasLegend, type NodeVisualStatus } from "./graph-canvas";
-import { GraphEditor, type AvailableSkill } from "./graph-editor";
+import { GraphEditor, type AvailableSkill, type CrewMemberOption } from "./graph-editor";
 import { ExportedFileView, type ExportedFile } from "./exported-file";
 import { CopyCommand } from "./copy-command";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
+import { GraphStudioFlow } from "./graph-studio-icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -100,6 +101,7 @@ function useStudio(threadId: string | null) {
   const [runs, setRuns] = useState<RunDto[]>([]);
   const [skills, setSkills] = useState<AvailableSkill[]>([]);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [crewMembers, setCrewMembers] = useState<CrewMemberOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const requestId = useRef(0);
@@ -124,6 +126,18 @@ function useStudio(threadId: string | null) {
         setError(cause instanceof Error ? cause.message : String(cause));
       },
     );
+    // Apart from the rest: the member picker is a convenience of one node
+    // kind, and a missing Crew plugin must not keep the library from loading.
+    void Promise.resolve()
+      .then(() => rpc.call("listCrewMembers", { threadId }))
+      .then(
+        (memberList) => {
+          if (id === requestId.current) setCrewMembers(memberList?.members ?? []);
+        },
+        () => {
+          if (id === requestId.current) setCrewMembers([]);
+        },
+      );
   }, [rpc, threadId]);
 
   useEffect(refetch, [refetch]);
@@ -152,6 +166,7 @@ function useStudio(threadId: string | null) {
     runs,
     skills,
     skillsError,
+    crewMembers,
     error,
     setError,
     pending,
@@ -1007,6 +1022,7 @@ export function GraphStudioPanel({
     runs,
     skills,
     skillsError,
+    crewMembers,
     error,
     setError,
     pending,
@@ -1176,6 +1192,7 @@ export function GraphStudioPanel({
             templates={templates}
             availableSkills={skills}
             skillsError={skillsError}
+            crewMembers={crewMembers}
             onExport={exportGraph}
             onImport={importGraph}
             exported={exported}
@@ -1190,7 +1207,7 @@ export function GraphStudioPanel({
             onCancel={() => setView({ kind: "library" })}
             onSave={(graph) =>
               void run(async () => {
-                await rpc.call("saveGraph", { graph });
+                await rpc.call("saveGraph", { graph, threadId });
                 refetch();
                 setView({ kind: "library" });
               })
@@ -1237,8 +1254,8 @@ export function GraphStudioHeaderAction({
         navigate.openThreadPanel({ actionId: "studio", title: "Graph Studio" })
       }
     >
-      <Icon name="Workflow" className="size-4" />
-      {isCompactViewport ? null : "Graph"}
+      <GraphStudioFlow className="size-4" />
+      {isCompactViewport ? null : "Graph Studio"}
     </Button>
   );
 }

@@ -83,6 +83,50 @@ export const MIGRATIONS = [
   // would be a claim that the node was free.
   `ALTER TABLE node_runs ADD COLUMN input_tokens INTEGER`,
   `ALTER TABLE node_runs ADD COLUMN output_tokens INTEGER`,
+  // Member nodes (plugin `crew`). A member's thread outlives the run, so the
+  // message sent to it is the thing a resume must not repeat: the row is
+  // written the moment Crew accepted the message, and a resumed node that
+  // finds it polls for the answer instead of sending again. `event_cursor`
+  // is where in the member's thread the answer was found.
+  `CREATE TABLE IF NOT EXISTS member_calls (
+     run_id TEXT NOT NULL,
+     node_id TEXT NOT NULL,
+     visit INTEGER NOT NULL,
+     attempt INTEGER NOT NULL,
+     message_id TEXT NOT NULL,
+     event_cursor INTEGER,
+     PRIMARY KEY (run_id, node_id, visit, attempt)
+   )`,
+  // Who drives a run. A reload, a slow restart or a second call of
+  // resume-orphans can each try to continue the same run; without a claim
+  // two drivers walk the graph side by side and an agent node spawns twice.
+  // A driver takes the run by compare-and-set and renews the heartbeat while
+  // it works; a heartbeat older than the expiry means the driver died, and
+  // the run may be taken over. Null = nobody claims it.
+  `ALTER TABLE runs ADD COLUMN driver_id TEXT`,
+  `ALTER TABLE runs ADD COLUMN driver_heartbeat_at INTEGER`,
+  // Rerun generation (BBP-15). A rerun from a checkpoint replays a member
+  // node with the same visit and attempt as before, so the ledger key — and
+  // Crew's correlation id — matched the earlier delivery and the member was
+  // never asked again. Only a deliberate rerun raises the generation; a
+  // resume after a crash keeps it, so that one still does not send twice.
+  // SQLite cannot change a primary key in place, hence the copy: existing
+  // rows belong to generation 0, the one every run so far has been in.
+  `ALTER TABLE runs ADD COLUMN rerun_gen INTEGER NOT NULL DEFAULT 0`,
+  `CREATE TABLE IF NOT EXISTS member_calls_v2 (
+     run_id TEXT NOT NULL,
+     gen INTEGER NOT NULL,
+     node_id TEXT NOT NULL,
+     visit INTEGER NOT NULL,
+     attempt INTEGER NOT NULL,
+     message_id TEXT NOT NULL,
+     event_cursor INTEGER,
+     PRIMARY KEY (run_id, gen, node_id, visit, attempt)
+   )`,
+  `INSERT OR IGNORE INTO member_calls_v2 (run_id, gen, node_id, visit, attempt, message_id, event_cursor)
+     SELECT run_id, 0, node_id, visit, attempt, message_id, event_cursor FROM member_calls`,
+  `DROP TABLE member_calls`,
+  `ALTER TABLE member_calls_v2 RENAME TO member_calls`,
 ];
 
 export type RunStatus =
@@ -123,6 +167,15 @@ export type NodeRunRow = {
   /** Null = not read (yet), not "none". See the migration note. */
   inputTokens: number | null;
   outputTokens: number | null;
+};
+
+export type MemberCallKey = {
+  runId: string;
+  /** Rerun generation of the run; see the migration note. */
+  gen: number;
+  nodeId: string;
+  visit: number;
+  attempt: number;
 };
 
 export function createStore(db: Database) {
@@ -193,6 +246,44 @@ export function createStore(db: Database) {
     `INSERT INTO dialogs (run_id, node_id, visit, thread_id, turns)
      VALUES (@runId, @nodeId, @visit, @threadId, @turns)
      ON CONFLICT(run_id, node_id, visit) DO UPDATE SET turns = excluded.turns`,
+  );
+
+  const getMemberCallStmt = db.prepare(
+    `SELECT message_id, event_cursor FROM member_calls
+     WHERE run_id = ? AND gen = ? AND node_id = ? AND visit = ? AND attempt = ?`,
+  );
+  // DO NOTHING, not an update: the first message id recorded for a key is
+  // the one Crew holds under that correlation id, and it must stay.
+  const insertMemberCallStmt = db.prepare(
+    `INSERT INTO member_calls (run_id, gen, node_id, visit, attempt, message_id, event_cursor)
+     VALUES (@runId, @gen, @nodeId, @visit, @attempt, @messageId, NULL)
+     ON CONFLICT(run_id, gen, node_id, visit, attempt) DO NOTHING`,
+  );
+  const setMemberCursorStmt = db.prepare(
+    `UPDATE member_calls SET event_cursor = @eventCursor
+     WHERE run_id = @runId AND gen = @gen AND node_id = @nodeId AND visit = @visit AND attempt = @attempt`,
+  );
+
+  // The compare-and-set behind `claimRun`: one statement, so of two callers
+  // racing for the same run SQLite lets exactly one change the row.
+  const claimRunStmt = db.prepare(
+    `UPDATE runs SET driver_id = @driverId, driver_heartbeat_at = @now
+     WHERE id = @id AND (driver_id IS NULL OR driver_id = @driverId
+       OR driver_heartbeat_at IS NULL OR driver_heartbeat_at < @staleBefore)`,
+  );
+  const heartbeatRunStmt = db.prepare(
+    `UPDATE runs SET driver_heartbeat_at = @now WHERE id = @id AND driver_id = @driverId`,
+  );
+  const releaseRunStmt = db.prepare(
+    `UPDATE runs SET driver_id = NULL, driver_heartbeat_at = NULL
+     WHERE id = @id AND driver_id = @driverId`,
+  );
+  const bumpRerunGenStmt = db.prepare(
+    `UPDATE runs SET rerun_gen = rerun_gen + 1 WHERE id = ? RETURNING rerun_gen`,
+  );
+  const getRerunGenStmt = db.prepare(`SELECT rerun_gen FROM runs WHERE id = ?`);
+  const getDriverStmt = db.prepare(
+    `SELECT driver_id, driver_heartbeat_at FROM runs WHERE id = ?`,
   );
 
   const toRun = (row: Record<string, unknown>): RunRow => ({
@@ -295,6 +386,38 @@ export function createStore(db: Database) {
         listRunsByThreadStmt.all(threadId, limit) as Array<Record<string, unknown>>
       ).map(toRun);
     },
+    /**
+     * Take the run for `driverId`: true when it was free, already this
+     * driver's, or its driver's heartbeat is older than `expiryMs`.
+     */
+    claimRun(id: string, driverId: string, now: number, expiryMs: number): boolean {
+      return (
+        claimRunStmt.run({ id, driverId, now, staleBefore: now - expiryMs }).changes === 1
+      );
+    },
+    /** Renew the claim; false when the run is no longer this driver's. */
+    heartbeatRun(id: string, driverId: string, now: number): boolean {
+      return heartbeatRunStmt.run({ id, driverId, now }).changes === 1;
+    },
+    /** Give the run up — only if it is still this driver's. */
+    releaseRun(id: string, driverId: string) {
+      releaseRunStmt.run({ id, driverId });
+    },
+    /** Raise the run's rerun generation; only a deliberate rerun calls this. */
+    bumpRerunGeneration(id: string): number {
+      const row = bumpRerunGenStmt.get(id) as { rerun_gen: number } | undefined;
+      if (!row) throw new Error(`No run ${id}.`);
+      return row.rerun_gen;
+    },
+    rerunGeneration(id: string): number {
+      return (getRerunGenStmt.get(id) as { rerun_gen: number } | undefined)?.rerun_gen ?? 0;
+    },
+    getDriver(id: string): { driverId: string | null; heartbeatAt: number | null } | null {
+      const row = getDriverStmt.get(id) as
+        | { driver_id: string | null; driver_heartbeat_at: number | null }
+        | undefined;
+      return row ? { driverId: row.driver_id, heartbeatAt: row.driver_heartbeat_at } : null;
+    },
     listRunsByStatus(status: RunStatus): RunRow[] {
       return (
         listRunsByStatusStmt.all(status) as Array<Record<string, unknown>>
@@ -372,6 +495,21 @@ export function createStore(db: Database) {
       return (
         listDialogsStmt.all(runId) as Array<{ node_id: string; thread_id: string }>
       ).map((row) => ({ nodeId: row.node_id, threadId: row.thread_id }));
+    },
+    /** The message a member node already sent for this visit and attempt. */
+    getMemberCall(
+      key: MemberCallKey,
+    ): { messageId: string; eventCursor: number | null } | null {
+      const row = getMemberCallStmt.get(key.runId, key.gen, key.nodeId, key.visit, key.attempt) as
+        | { message_id: string; event_cursor: number | null }
+        | undefined;
+      return row ? { messageId: row.message_id, eventCursor: row.event_cursor } : null;
+    },
+    recordMemberCall(key: MemberCallKey, messageId: string) {
+      insertMemberCallStmt.run({ ...key, messageId });
+    },
+    setMemberCursor(key: MemberCallKey, eventCursor: number | null) {
+      setMemberCursorStmt.run({ ...key, eventCursor });
     },
     listNodeRuns(runId: string): NodeRunRow[] {
       return (

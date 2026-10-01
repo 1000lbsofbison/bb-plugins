@@ -14,7 +14,8 @@ import type { NodeRunRow, RunStatus } from "./store";
 export type DialogRow = { nodeId: string; threadId: string };
 
 /**
- * The threads a run still owes a goodbye when it ends, deduplicated.
+ * The threads a run still owes a goodbye when it ends, deduplicated. Threads
+ * of `member` nodes (`memberNodeIds`) are never among them.
  *
  * Two sources, because two kinds of worker end up orphaned:
  *
@@ -32,11 +33,16 @@ export type DialogRow = { nodeId: string; threadId: string };
 export function orphanedWorkers(
   nodeRuns: NodeRunRow[],
   dialogs: DialogRow[],
+  memberNodeIds: ReadonlySet<string> = new Set(),
 ): string[] {
   const threads = new Set<string>();
   const finished = new Set<string>();
   for (const row of nodeRuns) {
     if (!row.childThreadId) continue;
+    // A Crew member's thread is not the run's worker: it existed before the
+    // run and goes on after it. Telling it "the run is over, write down what
+    // you have and stop" would end a colleague's shift for a graph's sake.
+    if (memberNodeIds.has(row.nodeId)) continue;
     if (row.status === "running") threads.add(row.childThreadId);
     if (row.status === "done") finished.add(row.childThreadId);
   }
@@ -54,9 +60,15 @@ export function orphanedWorkers(
  * only to the first. A dialogue thread parked at an interrupt is idle, not
  * working; interrupting it is the farewell's business, not this one's.
  */
-export function interruptibleWorkers(nodeRuns: NodeRunRow[]): string[] {
+export function interruptibleWorkers(
+  nodeRuns: NodeRunRow[],
+  memberNodeIds: ReadonlySet<string> = new Set(),
+): string[] {
   const threads = new Set<string>();
   for (const row of nodeRuns) {
+    // Same reason as above: a stop ends the run's own work, never a member's
+    // turn — that turn may well be serving someone else by now.
+    if (memberNodeIds.has(row.nodeId)) continue;
     if (row.status === "running" && row.childThreadId) {
       threads.add(row.childThreadId);
     }

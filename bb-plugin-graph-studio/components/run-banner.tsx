@@ -13,6 +13,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { RunDto, rpcContract } from "../server";
 import { Icon } from "@/components/ui/icon";
+import { GraphStudioFlow } from "./graph-studio-icon";
 import { cn } from "@/lib/utils";
 
 /**
@@ -101,8 +102,7 @@ export function GraphStudioRunBanner() {
       )}
       aria-label={`Graph Studio: open ${run.graph.name}`}
     >
-      <Icon
-        name="Workflow"
+      <GraphStudioFlow
         className={cn("size-3.5 shrink-0", waiting && "text-blue-600")}
       />
       <span className="min-w-0 flex-1 truncate">

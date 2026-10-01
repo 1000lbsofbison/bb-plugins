@@ -16,6 +16,7 @@ import {
   emptyRunState,
   fieldSchema,
   graphSchema,
+  memberNodes,
   nodeExecution,
   spawnExecution,
   validateGraph,
@@ -28,12 +29,20 @@ import {
   orphanedWorkers,
 } from "./lib/orphans";
 import { compileGraph, GuardStop, type RuntimeHost } from "./lib/runtime";
+import { GRAPH_STUDIO_ICON } from "./lib/icon";
+import {
+  createCrewClient,
+  memberCorrelationId,
+  memberProblems,
+  type CallRpc,
+} from "./lib/crew";
 import {
   describeAttempt,
   describeGraph,
   describeLibrary,
   runTotal,
 } from "./lib/describe";
+import { checkModels, type WantedModel } from "./lib/model-check";
 import { SqliteCheckpointer } from "./lib/checkpointer";
 import { MIGRATIONS, createStore, type RunRow, type RunStatus } from "./lib/store";
 import { RENAMED_TEMPLATES, TEMPLATES, searchGraphs } from "./lib/templates";
@@ -140,7 +149,14 @@ export const rpcContract = defineRpcContract({
     }),
   },
   saveGraph: {
-    input: z.object({ graph: graphSchema }),
+    input: z.object({
+      graph: graphSchema,
+      /**
+       * The thread the editor is open in. Only member nodes need it: their
+       * addresses mean something only inside that thread's project.
+       */
+      threadId: z.string().nullable().default(null),
+    }),
     output: z.object({ graph: graphSchema, problems: z.array(problemSchema) }),
   },
   deleteGraph: {
@@ -192,6 +208,20 @@ export const rpcContract = defineRpcContract({
           description: z.string().nullable(),
           scope: z.string(),
         }),
+      ),
+      error: z.string().nullable(),
+    }),
+  },
+  /**
+   * Crew members in a thread's project, for the member node's picker. Never
+   * throws: without Crew the editor still takes a typed address, and the save
+   * check says what is wrong with it.
+   */
+  listCrewMembers: {
+    input: z.object({ threadId: z.string().nullable().default(null) }),
+    output: z.object({
+      members: z.array(
+        z.object({ address: z.string(), role: z.string(), activity: z.string() }),
       ),
       error: z.string().nullable(),
     }),
@@ -370,6 +400,37 @@ export default function graphStudio(bb: BbPluginApi) {
 
   const publish = () => bb.realtime.publish("graph-studio", {});
 
+  const crew = createCrewClient(((args) =>
+    bb.sdk.plugins.callRpc(args as never)) as CallRpc);
+
+  /** Member node ids of a graph and the graphs it embeds. */
+  const memberIdsOf = (graph: Graph): Set<string> =>
+    new Set(memberNodes(graph, resolveGraph).map((node) => node.id));
+
+  /** The project a thread belongs to; null when there is no thread or it cannot be read. */
+  async function projectOfThread(threadId: string | null): Promise<string | null> {
+    if (!threadId) return null;
+    try {
+      return (await bb.sdk.threads.get({ threadId })).projectId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Refuse a graph whose member nodes cannot run: Crew missing, or a member
+   * it does not know. Thrown, not returned as a finding, because the one
+   * outcome this must rule out is a graph that looks fine and then runs
+   * without its crew.
+   */
+  async function assertMembersReachable(graph: Graph, projectId: string | null) {
+    const problems = await memberProblems(graph, resolveGraph, crew, projectId);
+    if (problems.length > 0) {
+      const text = problems.join("; ");
+      throw new Error(`Member nodes cannot run: ${text}${text.endsWith(".") ? "" : "."}`);
+    }
+  }
+
   /** Interrupt payloads, keyed by run. Rebuilt from the graph on resume. */
   const pending = new Map<
     string,
@@ -377,6 +438,78 @@ export default function graphStudio(bb: BbPluginApi) {
   >();
   /** Runs whose stop was requested; checked between nodes. */
   const stopping = new Set<string>();
+
+  /**
+   * Per-run claim: exactly one driver continues a run (BBP-16).
+   *
+   * Each loaded instance of this plugin is its own driver. A plugin reload
+   * does not end the promises of the previous instance, and a slow server
+   * restart re-runs resume-orphans while the previous process may have
+   * driven the run seconds before — both were seen resuming the same run
+   * twice. The claim lives in the database, so it holds across instances
+   * and processes; the heartbeat lets a successor take over from a driver
+   * that died without releasing.
+   */
+  const driverId = `drv_${randomUUID().slice(0, 12)}`;
+  /** Runs this instance drives right now, with their heartbeat timer. */
+  const driving = new Map<string, ReturnType<typeof setInterval>>();
+  /**
+   * Runs this instance was driving and gave up — its claim was lost or the
+   * plugin is being disposed. Checked like a stop at every node boundary,
+   * but writes nothing: the run belongs to someone else now.
+   */
+  const lost = new Set<string>();
+  let disposed = false;
+  /**
+   * Workers a takeover found still alive, by run and node, oldest attempt
+   * first (BBP-20). The node's replay picks its entry up in `onNodeStart`
+   * and awaits that thread instead of spawning a new one.
+   */
+  const reattach = new Map<string, Map<string, Array<{ nodeRunId: string; threadId: string }>>>();
+  /** Attempts handed an adopted worker, waiting for `adoptedThread` to collect it. */
+  const adopted = new Map<string, string>();
+  const halted = (runId: string) => stopping.has(runId) || lost.has(runId);
+
+  /** Take the run, or say who has it. Synchronous from check to claim. */
+  function claim(runId: string): boolean {
+    if (disposed || driving.has(runId)) return false;
+    if (!store.claimRun(runId, driverId, Date.now(), CLAIM_EXPIRY_MS)) return false;
+    lost.delete(runId);
+    const timer = setInterval(() => {
+      let held = false;
+      try {
+        held = store.heartbeatRun(runId, driverId, Date.now());
+      } catch {
+        // A closed database after dispose: the claim is gone either way.
+      }
+      if (!held) abandon(runId, "its claim was taken over");
+    }, CLAIM_HEARTBEAT_MS);
+    // A heartbeat must not keep a test process or a shutting-down host alive.
+    (timer as { unref?: () => void }).unref?.();
+    driving.set(runId, timer);
+    return true;
+  }
+
+  function unclaim(runId: string) {
+    const timer = driving.get(runId);
+    if (timer) clearInterval(timer);
+    driving.delete(runId);
+    try {
+      store.releaseRun(runId, driverId);
+    } catch {
+      // Closed database: the expiry releases it.
+    }
+  }
+
+  /** Stop driving without touching the run's status. */
+  function abandon(runId: string, why: string) {
+    if (!driving.has(runId) || lost.has(runId)) return;
+    bb.log.warn(`[run ${runId}] Driver ${driverId} stops driving: ${why}.`);
+    lost.add(runId);
+    const timer = driving.get(runId);
+    if (timer) clearInterval(timer);
+    for (const controller of stopWaiters.get(runId) ?? []) controller.abort();
+  }
   /**
    * The waits a run currently holds, keyed by run, aborted when its stop is
    * requested. `threads.wait` honours the signal on its next poll — 250 ms in
@@ -470,6 +603,14 @@ export default function graphStudio(bb: BbPluginApi) {
   /** One poll timer per running run. */
   const watchers = new Map<string, ReturnType<typeof setInterval>>();
 
+  /** How often a driver renews its claim on a run, and how often orphans are swept. */
+  const CLAIM_HEARTBEAT_MS = 10_000;
+  /** A claim not renewed for this long belongs to a driver that died. */
+  const CLAIM_EXPIRY_MS = 60_000;
+
+  /** How often a member node asks Crew whether its answer is there. */
+  const MEMBER_POLL_MS = 2_000;
+
   /** How often a running run asks its workers what they are doing. */
   const ACTIVITY_POLL_MS = 3_000;
 
@@ -539,6 +680,7 @@ export default function graphStudio(bb: BbPluginApi) {
     const timer = watchers.get(runId);
     if (timer) clearInterval(timer);
     watchers.delete(runId);
+    if (disposed) return; // the database may already be closed
     for (const row of store.listNodeRuns(runId)) activity.delete(row.id);
   }
 
@@ -610,7 +752,7 @@ export default function graphStudio(bb: BbPluginApi) {
   ): RuntimeHost {
     return {
       async spawn({ prompt, title, execution }) {
-        if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+        if (halted(runId)) throw new GuardStop("The run was stopped.");
         if (!parentThreadId) {
           throw new Error("A run needs a parent thread.");
         }
@@ -685,7 +827,7 @@ export default function graphStudio(bb: BbPluginApi) {
         return child.id;
       },
       async awaitThread(threadId) {
-        if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+        if (halted(runId)) throw new GuardStop("The run was stopped.");
         // `wait` is race-free: it resolves immediately if the thread already
         // reached the status, so a fast child cannot slip past a listener.
         // The six hours are the ceiling, not the plan: the signal aborts the
@@ -705,7 +847,7 @@ export default function graphStudio(bb: BbPluginApi) {
           // Idle can be the interruption's doing: a worker stopped mid-turn
           // is idle with a half-finished answer. Say the stop rather than
           // collect that as a result.
-          if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+          if (halted(runId)) throw new GuardStop("The run was stopped.");
           output = (await bb.sdk.threads.output({ threadId })).output ?? "";
         } catch (cause) {
           // An abort surfaces as whatever the transport makes of it; what
@@ -723,7 +865,7 @@ export default function graphStudio(bb: BbPluginApi) {
         return output;
       },
       async sendMessage(threadId: string, text: string) {
-        if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+        if (halted(runId)) throw new GuardStop("The run was stopped.");
         await bb.sdk.threads.send({
           threadId,
           mode: "start",
@@ -744,6 +886,109 @@ export default function graphStudio(bb: BbPluginApi) {
           bb.log.info(`[run ${runId}] Thread ${threadId} never became active.`);
         }
       },
+      async sendToMember({ nodeId, visit, attempt, address, body }) {
+        if (halted(runId)) throw new GuardStop("The run was stopped.");
+        const project = projectId ?? (await projectOfThread(parentThreadId));
+        if (!project) {
+          throw new Error(
+            `A member node needs the run's project to find "${address}" in; this run has none.`,
+          );
+        }
+        // Asked every time, not only at start: a member may have been removed
+        // or its crew stopped since. Failing here is the whole point — the
+        // node must never fall back to a fresh thread.
+        const found = await crew.resolveMember(project, address);
+        if (!found.member) {
+          throw new Error(
+            `Crew does not know the member "${address}" in this project${found.error ? `: ${found.error}` : "."}`,
+          );
+        }
+        // Read per send, not per drive: a resume must find the generation the
+        // crashed driver sent under, and only `rerunFrom` changes it.
+        const key = { runId, gen: store.rerunGeneration(runId), nodeId, visit, attempt };
+        const known = store.getMemberCall(key);
+        if (known) {
+          // A resume after a crash: the message is out, the answer is what is
+          // missing. Sending again would give the member the task twice.
+          bb.log.info(
+            `[run ${runId}] ${nodeId} gen ${key.gen} visit ${visit} attempt ${attempt}: message ${known.messageId} was already sent to ${address}; waiting for its answer.`,
+          );
+          return { messageId: known.messageId, threadId: found.member.threadId };
+        }
+        const run = store.getRun(runId);
+        const label =
+          memberNodes(run?.graph ?? { nodes: [] } as never, resolveGraph).find(
+            (node) => node.id === nodeId,
+          )?.label ?? nodeId;
+        const sent = await crew.sendToMember({
+          projectId: project,
+          address,
+          body,
+          subject: `${run?.graph.name ?? "Graph Studio"} · ${label}`.slice(0, 200),
+          correlationId: memberCorrelationId(key),
+        });
+        if (!sent.messageId) {
+          throw new Error(
+            `Crew refused the message to "${address}"${sent.error ? `: ${sent.error}` : ` (${sent.status}).`}`,
+          );
+        }
+        store.recordMemberCall(key, sent.messageId);
+        return { messageId: sent.messageId, threadId: found.member.threadId };
+      },
+      async awaitMemberReply({ nodeId, visit, attempt, messageId }) {
+        const controller = trackStop(runId);
+        const deadline = Date.now() + 1000 * 60 * 60 * 6;
+        let heldSaid = false;
+        try {
+          for (;;) {
+            if (halted(runId) || controller.signal.aborted) {
+              throw new GuardStop("The run was stopped.");
+            }
+            const reply = await crew.memberReply(messageId, controller.signal);
+            if (reply.status === "completed") {
+              store.setMemberCursor(
+                { runId, gen: store.rerunGeneration(runId), nodeId, visit, attempt },
+                reply.eventCursor,
+              );
+              const text = reply.text ?? "";
+              if (text.trim() === "") {
+                throw new Error(`The member answered message ${messageId} with nothing.`);
+              }
+              return { text, threadId: reply.threadId };
+            }
+            if (reply.status === "failed" || reply.status === "refused") {
+              throw new Error(
+                `The member's answer to message ${messageId} ${reply.status === "failed" ? "failed" : "was refused"}${reply.text ? `: ${reply.text}` : "."}`,
+              );
+            }
+            if (reply.status === "held" && !heldSaid) {
+              heldSaid = true;
+              bb.log.info(
+                `[run ${runId}] Message ${messageId} is held by Crew${reply.text ? ` (${reply.text})` : ""}; waiting.`,
+              );
+            }
+            if (Date.now() > deadline) {
+              throw new Error(`No answer to message ${messageId} within six hours.`);
+            }
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, MEMBER_POLL_MS);
+              controller.signal.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  resolve();
+                },
+                { once: true },
+              );
+            });
+          }
+        } catch (cause) {
+          if (controller.signal.aborted) throw new GuardStop("The run was stopped.");
+          throw cause;
+        } finally {
+          untrackStop(runId, controller);
+        }
+      },
       async loadDialog(nodeId: string, visit: number) {
         return store.getDialog(runId, nodeId, visit);
       },
@@ -755,19 +1000,33 @@ export default function graphStudio(bb: BbPluginApi) {
         store.saveDialog(runId, nodeId, visit, session);
       },
       async onNodeThread(nodeRunId: string, threadId: string) {
+        if (lost.has(runId)) return;
         store.attachThread(nodeRunId, threadId);
         publish();
       },
       async onNodeStart(nodeId: string) {
+        if (lost.has(runId)) throw new GuardStop("The run is driven elsewhere.");
         // A dialogue node re-enters this hook on every interrupt replay, but
         // it is one conversation. Reuse the open row, or the run history would
         // count each answered question as another attempt.
-        const kind = store
-          .getRun(runId)
-          ?.graph.nodes.find((node) => node.id === nodeId)?.kind;
-        if (kind === "dialog") {
+        const graph = store.getRun(runId)?.graph;
+        const kind = graph?.nodes.find((node) => node.id === nodeId)?.kind;
+        // A member node reuses the row a crash left open, too: after the
+        // resume it is the same delivery, not a second attempt.
+        if (kind === "dialog" || (graph && memberIdsOf(graph).has(nodeId))) {
           const open = store.findRunningNodeRun(runId, nodeId);
           if (open) return open.id;
+        }
+        // An agent attempt whose worker outlived its driver: the same attempt
+        // continues on the same row, so no Abandoned entry and no new spawn.
+        const waiting = reattach.get(runId)?.get(nodeId);
+        const kept = waiting?.shift();
+        if (kept) {
+          adopted.set(kept.nodeRunId, kept.threadId);
+          bb.log.info(
+            `[run ${runId}] ${nodeId}: re-attached to worker ${kept.threadId}; waiting for its result.`,
+          );
+          return kept.nodeRunId;
         }
         const id = randomUUID();
         store.insertNodeRun({
@@ -787,7 +1046,23 @@ export default function graphStudio(bb: BbPluginApi) {
         publish();
         return id;
       },
+      adoptedThread(nodeRunId: string) {
+        const threadId = adopted.get(nodeRunId) ?? null;
+        adopted.delete(nodeRunId);
+        return threadId;
+      },
       async onNodeFinish(nodeRunId, patch) {
+        // An abandoned attempt stays open: the successor resumes exactly
+        // this row, and closing it here would make the resume a new attempt.
+        if (lost.has(runId)) return;
+        const graph = store.getRun(runId)?.graph;
+        const nodeId = store
+          .listNodeRuns(runId)
+          .find((row) => row.id === nodeRunId)?.nodeId;
+        // A member's thread counts tokens for its whole life, across runs and
+        // other people's messages. Its total is not what this node cost, and
+        // "unknown" is the honest reading.
+        const member = graph !== undefined && nodeId !== undefined && memberIdsOf(graph).has(nodeId);
         store.updateNodeRun(nodeRunId, {
           ...patch,
           endedAt: Date.now(),
@@ -795,11 +1070,14 @@ export default function graphStudio(bb: BbPluginApi) {
           // final one for this node. Read here rather than live: a node is
           // billed once it is done, and polling a running thread would add
           // traffic per superstep for a number nobody can act on yet.
-          ...(await tokenUsage(patch.childThreadId)),
+          ...(member
+            ? { inputTokens: null, outputTokens: null }
+            : await tokenUsage(patch.childThreadId)),
         });
         publish();
       },
       async onStateChange(state) {
+        if (lost.has(runId)) return;
         const row = store.getRun(runId);
         if (!row) return;
         store.updateRun(
@@ -815,63 +1093,45 @@ export default function graphStudio(bb: BbPluginApi) {
 
   /**
    * Nodes whose explicit model the executing machine does not offer, as ready
-   * German sentences. Empty when every named model resolves — and also when the
-   * catalog itself could not be read: a provider hiccup must not stop a run
-   * that would otherwise work. The check is fail-closed on a definite mismatch
-   * and fail-open on an unanswerable question.
+   * sentences. Fail-closed on a definite mismatch, fail-open (with a logged
+   * warning) when a catalogue cannot answer: a provider hiccup must not stop a
+   * run that would otherwise work.
    */
   async function unknownModels(
     graph: Graph,
     parentThreadId: string | null,
   ): Promise<string[]> {
-    const wanted = graph.nodes
-      .map((node) => ({ node, execution: nodeExecution(node) }))
-      .filter((entry) => entry.execution !== null);
+    const wanted: WantedModel[] = [];
+    for (const node of graph.nodes) {
+      const execution = nodeExecution(node);
+      if (execution) {
+        wanted.push({ label: node.label, providerId: execution.providerId, model: execution.model });
+      }
+    }
     if (wanted.length === 0 || !parentThreadId) return [];
 
-    let catalog;
+    let environmentId: string | null;
     try {
-      // The catalog is per environment: a provider may offer different models
-      // on a remote machine than on this one, so asking globally would bless a
-      // model the worker's own machine cannot run.
-      const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
-      if (!parent.environmentId) return [];
-      catalog = await bb.sdk.providers.models({
-        environmentId: parent.environmentId,
-      });
+      // Workers spawn into the parent thread's environment, so that is the
+      // machine whose catalogue counts — a remote host may offer other models.
+      environmentId = (await bb.sdk.threads.get({ threadId: parentThreadId })).environmentId ?? null;
     } catch (cause) {
       bb.log.warn(
-        `Model catalogue unreadable, model check skipped: ${
+        `Parent thread unreadable, model check skipped: ${
           cause instanceof Error ? cause.message : String(cause)
         }`,
       );
       return [];
     }
+    if (!environmentId) return [];
+    const envId = environmentId;
 
-    const providers = new Set(
-      catalog.providers.filter((entry) => entry.available).map((entry) => entry.id),
+    // One request per provider: without `providerId` BB answers with the
+    // default provider's catalogue only (BBP-21).
+    const { problems, warnings } = await checkModels(wanted, (providerId) =>
+      bb.sdk.providers.models({ environmentId: envId, providerId }),
     );
-    // A catalog entry carries both an id and the provider-facing model name;
-    // either is a legitimate thing for a stored graph to name.
-    const models = new Set(
-      catalog.models.flatMap((entry) => [entry.id, entry.model]),
-    );
-
-    const problems: string[] = [];
-    for (const { node, execution } of wanted) {
-      if (!execution) continue;
-      if (!providers.has(execution.providerId)) {
-        problems.push(
-          `"${node.label}" names the provider "${execution.providerId}", which this machine does not offer`,
-        );
-        continue;
-      }
-      if (!models.has(execution.model)) {
-        problems.push(
-          `"${node.label}" names the model "${execution.model}", which does not appear in the catalogue of "${execution.providerId}"`,
-        );
-      }
-    }
+    for (const warning of warnings) bb.log.warn(`Model check: ${warning}`);
     return problems;
   }
 
@@ -883,9 +1143,158 @@ export default function graphStudio(bb: BbPluginApi) {
     runId: string,
     resume?: string,
     fromCheckpointId?: string,
-  ) {
+    claimedNote?: string,
+  ): Promise<boolean> {
     const row = store.getRun(runId);
-    if (!row) return;
+    if (!row) return false;
+    if (!claim(runId)) {
+      const holder = store.getDriver(runId)?.driverId;
+      // Debug, not info: the orphan sweep asks every few seconds, and a run
+      // that is in good hands elsewhere is the normal case.
+      bb.log.debug(
+        `[run ${runId}] Not driven by ${driverId}: ${
+          driving.has(runId) ? "already driving it" : `claimed by ${holder ?? "another driver"}`
+        }.`,
+      );
+      return false;
+    }
+    if (claimedNote) {
+      bb.log.info(`${claimedNote} (driver ${driverId})`);
+      await settleAbandonedAttempts(row);
+    }
+    try {
+      await driveClaimed(row, resume, fromCheckpointId);
+    } finally {
+      await releaseUnclaimedWorkers(runId);
+      unclaim(runId);
+      lost.delete(runId);
+    }
+    return true;
+  }
+
+  /**
+   * Sort what the previous driver left mid-flight before taking a run over.
+   *
+   * An agent node is replayed by LangGraph on resume. Its worker may well
+   * still be working, or be finished with an answer nobody collected — then
+   * the replay re-attaches to it (see `reattach`) and the node runs once
+   * (BBP-20). Only a worker that is really lost — no thread id, thread gone,
+   * archived, deleted, errored, being stopped, or idle without an answer —
+   * gets its attempt closed and the node runs again with a fresh worker.
+   * Member and dialogue nodes are left alone: they resume their open row and
+   * thread on purpose.
+   */
+  async function settleAbandonedAttempts(row: RunRow) {
+    const members = memberIdsOf(row.graph);
+    const dialogs = new Set(
+      row.graph.nodes.filter((node) => node.kind === "dialog").map((node) => node.id),
+    );
+    const open = store
+      .listNodeRuns(row.id)
+      .filter(
+        (entry) =>
+          entry.status === "running" && !members.has(entry.nodeId) && !dialogs.has(entry.nodeId),
+      )
+      .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+    const kept = new Map<string, Array<{ nodeRunId: string; threadId: string }>>();
+    let closed = 0;
+    for (const entry of open) {
+      const lostBecause = entry.childThreadId
+        ? await whyWorkerLost(entry.childThreadId)
+        : "it never got a worker thread";
+      if (lostBecause === null) {
+        const list = kept.get(entry.nodeId) ?? [];
+        list.push({ nodeRunId: entry.id, threadId: entry.childThreadId! });
+        kept.set(entry.nodeId, list);
+        continue;
+      }
+      closed += 1;
+      store.updateNodeRun(entry.id, {
+        status: "failed",
+        childThreadId: entry.childThreadId,
+        output: null,
+        error: `Abandoned when its driver went away (${lostBecause}); the node runs again.`,
+        endedAt: Date.now(),
+      });
+      if (entry.childThreadId) await stopWorker(row.id, entry.childThreadId);
+    }
+    if (kept.size > 0) reattach.set(row.id, kept);
+    else reattach.delete(row.id);
+    if (closed > 0) publish();
+  }
+
+  /** Null when the worker can still deliver its answer; otherwise why not. */
+  async function whyWorkerLost(threadId: string): Promise<string | null> {
+    let thread: { status?: string; archivedAt?: number | null; deletedAt?: number | null };
+    try {
+      thread = (await bb.sdk.threads.get({ threadId })) as typeof thread;
+    } catch (cause) {
+      return `worker ${threadId} is missing: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
+    if (thread.deletedAt) return `worker ${threadId} was deleted`;
+    if (thread.archivedAt) return `worker ${threadId} was archived`;
+    switch (thread.status) {
+      case "active":
+      case "pending":
+      case "starting":
+        return null;
+      case "idle": {
+        // Finished while nobody was waiting: worth taking only if it left an
+        // answer — an empty one would just fail the adopted attempt instead.
+        try {
+          const { output } = await bb.sdk.threads.output({ threadId });
+          return (output ?? "").trim() === "" ? `worker ${threadId} is idle without a result` : null;
+        } catch {
+          return `worker ${threadId} has no readable result`;
+        }
+      }
+      default:
+        return `worker ${threadId} is ${thread.status ?? "in an unknown state"}`;
+    }
+  }
+
+  async function stopWorker(runId: string, threadId: string) {
+    try {
+      await bb.sdk.threads.stop({ threadId });
+      bb.log.info(`[run ${runId}] Interrupted abandoned worker ${threadId}.`);
+    } catch (cause) {
+      bb.log.warn(
+        `[run ${runId}] Could not interrupt abandoned worker ${threadId}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Kept workers the replay never asked for — the run ended or took another
+   * path first. Their rows would otherwise stay `running` for good. Skipped
+   * when this driver lost the run: the successor owns those rows now.
+   */
+  async function releaseUnclaimedWorkers(runId: string) {
+    const left = reattach.get(runId);
+    reattach.delete(runId);
+    if (!left || lost.has(runId) || disposed) return;
+    for (const entry of [...left.values()].flat()) {
+      adopted.delete(entry.nodeRunId);
+      store.updateNodeRun(entry.nodeRunId, {
+        status: "failed",
+        childThreadId: entry.threadId,
+        output: null,
+        error: "Abandoned: the resumed run did not come back to this node.",
+        endedAt: Date.now(),
+      });
+      await stopWorker(runId, entry.threadId);
+      publish();
+    }
+  }
+
+  async function driveClaimed(
+    row: RunRow,
+    resume?: string,
+    fromCheckpointId?: string,
+  ) {
+    const runId = row.id;
     const host = makeHost(runId, row.threadId, row.projectId);
 
     // Models are named in the graph but resolved on the machine that runs it.
@@ -932,6 +1341,8 @@ export default function graphStudio(bb: BbPluginApi) {
       const result = (await app.invoke(input as never, config)) as RunState & {
         __interrupt__?: Array<{ value: unknown }>;
       };
+      // Abandoned mid-way: the successor writes the outcome, not us.
+      if (lost.has(runId)) return;
 
       const headConfig = { configurable: { thread_id: runId } };
       const interrupts = (await app.getState(headConfig)).tasks.flatMap(
@@ -978,6 +1389,7 @@ export default function graphStudio(bb: BbPluginApi) {
         Date.now(),
       );
     } catch (cause) {
+      if (lost.has(runId)) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       const status: RunStatus =
         cause instanceof GuardStop || stopping.has(runId) ? "stopped" : "failed";
@@ -991,19 +1403,23 @@ export default function graphStudio(bb: BbPluginApi) {
       await farewellWorkers(runId, status, message);
     } finally {
       unwatchActivity(runId);
-      stopping.delete(runId);
-      stopWaiters.delete(runId);
-      publish();
+      // An abandoned run's stop flag and waiters are not this driver's to
+      // clear, and a disposed instance must not publish on a stale handle.
+      if (!lost.has(runId)) {
+        stopping.delete(runId);
+        stopWaiters.delete(runId);
+        publish();
+      }
     }
   }
 
   /** One implementation behind RPC, CLI and the agent tools. */
-  function startRun(args: {
+  async function startRun(args: {
     graphId: string;
     input: string;
     threadId: string | null;
     projectId: string | null;
-  }): string {
+  }): Promise<string> {
     const graph = resolveGraph(args.graphId);
     if (!graph) throw new Error(`Unknown graph ${args.graphId}`);
     if (!args.threadId) {
@@ -1019,6 +1435,10 @@ export default function graphStudio(bb: BbPluginApi) {
         `Graph is not runnable: ${errors.map((e) => e.message).join(" ")}`,
       );
     }
+    await assertMembersReachable(
+      graph,
+      args.projectId ?? (await projectOfThread(args.threadId)),
+    );
     const now = Date.now();
     const runId = `run_${randomUUID().slice(0, 12)}`;
     store.insertRun({
@@ -1111,6 +1531,9 @@ export default function graphStudio(bb: BbPluginApi) {
     pending.delete(runId);
     // A rerun replays the graph and asks again if it reaches the node again.
     announced.delete(runId);
+    // A new generation, so member nodes on the replayed path send anew
+    // instead of finding the earlier delivery in the ledger (BBP-15).
+    store.bumpRerunGeneration(runId);
     store.updateRun(
       runId,
       { status: "running", state: row.state, error: null },
@@ -1172,9 +1595,14 @@ export default function graphStudio(bb: BbPluginApi) {
    * thread: a worker that cannot be interrupted must not block the stop —
    * the aborted waits and the between-nodes flag are what make it certain.
    */
+  function membersOfRun(runId: string): Set<string> {
+    const row = store.getRun(runId);
+    return row ? memberIdsOf(row.graph) : new Set();
+  }
+
   async function interruptWorkers(runId: string) {
     await Promise.all(
-      interruptibleWorkers(store.listNodeRuns(runId)).map(async (threadId) => {
+      interruptibleWorkers(store.listNodeRuns(runId), membersOfRun(runId)).map(async (threadId) => {
         try {
           await bb.sdk.threads.stop({ threadId });
           bb.log.info(`[run ${runId}] Interrupted worker ${threadId}.`);
@@ -1207,6 +1635,7 @@ export default function graphStudio(bb: BbPluginApi) {
     const threads = orphanedWorkers(
       store.listNodeRuns(runId),
       store.listDialogs(runId),
+      membersOfRun(runId),
     );
     if (threads.length === 0) return;
     const text = farewellMessage(status, error);
@@ -1238,7 +1667,8 @@ export default function graphStudio(bb: BbPluginApi) {
       const graph = resolveGraph(id);
       return { graph, problems: graph ? validateGraph(graph, resolveGraph) : [] };
     },
-    saveGraph: ({ graph }) => {
+    saveGraph: async ({ graph, threadId }) => {
+      await assertMembersReachable(graph, await projectOfThread(threadId));
       const saved = store.saveGraph(graph, Date.now());
       publish();
       return { graph: saved, problems: validateGraph(saved, resolveGraph) };
@@ -1261,8 +1691,8 @@ export default function graphStudio(bb: BbPluginApi) {
       publish();
       return { graph };
     },
-    startRun: ({ graphId, input, threadId, projectId }) => {
-      const runId = startRun({ graphId, input, threadId, projectId });
+    startRun: async ({ graphId, input, threadId, projectId }) => {
+      const runId = await startRun({ graphId, input, threadId, projectId });
       return { run: toDto(runId)! };
     },
     getRun: ({ id }) => ({ run: toDto(id) }),
@@ -1306,6 +1736,26 @@ export default function graphStudio(bb: BbPluginApi) {
       } catch (cause) {
         return {
           skills: [],
+          error: cause instanceof Error ? cause.message : String(cause),
+        };
+      }
+    },
+    listCrewMembers: async ({ threadId }) => {
+      const projectId = await projectOfThread(threadId);
+      if (!projectId) return { members: [], error: "No project selected." };
+      try {
+        const { members } = await crew.listMembers(projectId);
+        return {
+          members: members.map((member) => ({
+            address: member.address,
+            role: member.role,
+            activity: member.activity,
+          })),
+          error: null,
+        };
+      } catch (cause) {
+        return {
+          members: [],
           error: cause instanceof Error ? cause.message : String(cause),
         };
       }
@@ -1459,12 +1909,17 @@ export default function graphStudio(bb: BbPluginApi) {
           if (!graphId || task.length === 0) {
             return fail('Usage: bb graph-studio run <graph-id> "<task>"');
           }
-          const runIdStarted = startRun({
+          let runIdStarted: string;
+          try {
+            runIdStarted = await startRun({
             graphId,
             input: task.join(" "),
             threadId: ctx.threadId ?? null,
             projectId: ctx.projectId ?? null,
-          });
+            });
+          } catch (cause) {
+            return fail(cause instanceof Error ? cause.message : String(cause));
+          }
           return ok(`Run started: ${runIdStarted}`);
         }
         case "runs": {
@@ -1644,7 +2099,7 @@ export default function graphStudio(bb: BbPluginApi) {
      * to pass through here.
      */
     description:
-      "Start a Graph Studio run: executes a stored graph whose nodes spawn BB threads. Supports cycles, conditional routing and human approval nodes.\n\nIMPORTANT: `input` is the only context the run gets. Its workers are fresh threads with no sight of this conversation, its attachments, or anything decided in it — and every node after the first reads only what the first one produced. So do not pass the user's last sentence: write out what the run needs to know. State the task, the constraints agreed here, what was already ruled out and why, and the paths of any files that matter (attachments included — quote what is relevant, workers cannot open them). Up to 8000 characters, and using them is usually right.",
+      "Start a Graph Studio run: executes a stored graph whose nodes spawn BB threads (member nodes use a Crew member's existing thread instead). Supports cycles, conditional routing and human approval nodes.\n\nIMPORTANT: `input` is the only context the run gets. Its workers are fresh threads with no sight of this conversation, its attachments, or anything decided in it — and every node after the first reads only what the first one produced. So do not pass the user's last sentence: write out what the run needs to know. State the task, the constraints agreed here, what was already ruled out and why, and the paths of any files that matter (attachments included — quote what is relevant, workers cannot open them). Up to 8000 characters, and using them is usually right.",
     parameters: z.object({
       graphId: z.string(),
       input: z.string().min(1).max(8000),
@@ -1654,7 +2109,7 @@ export default function graphStudio(bb: BbPluginApi) {
     // or leave it out and the run failed on "a run needs a parent thread" —
     // after the model had already written the input.
     execute: async ({ graphId, input }, ctx) => {
-      const startedId = startRun({
+      const startedId = await startRun({
         graphId,
         input,
         threadId: ctx.threadId,
@@ -1694,7 +2149,8 @@ export default function graphStudio(bb: BbPluginApi) {
       "Create or replace a Graph Studio graph from JSON, then report the validator's findings. Fix every error and save again before telling the user it is done.",
       "",
       "Shape (defaults may be left out): { id: lowercase-kebab, name, description, example: a real task in the user's words, nodes: [...], edges: [...] }.",
-      "Node: { id, label, kind: agent | dialog | human | note | subgraph, prompt, skills: [skill ids], fields: [{ name, type: string|number|boolean|enum|list, options?: [..] }], maxVisits, maxAttempts, onError: stop|route, routing: first|every, providerId + model (both or neither; leave out to inherit the thread's model), graphId (subgraph only: the graph it imports) }.",
+      "Node: { id, label, kind: agent | dialog | human | note | subgraph | member, prompt, skills: [skill ids], fields: [{ name, type: string|number|boolean|enum|list, options?: [..] }], maxVisits, maxAttempts, onError: stop|route, routing: first|every, providerId + model (both or neither; leave out to inherit the thread's model), graphId (subgraph only: the graph it imports), member (member only: 'member@crew') }.",
+      "kind member: the step goes to a persistent member of a crew (plugin Crew) instead of a fresh thread — same prompt, fields and routing as an agent node, but no providerId/model/skills (the crew file sets those). Saving is refused when Crew is not installed or the member is unknown in this project; the template owner-check-loop shows the shape.",
       "Prompts read {{input}} (the run's task) and {{node_id}} (an earlier node's result).",
       "Edge: { from, to, when?: { source: output|field, key, op: contains|notContains|equals|matches|visitsBelow|failed|succeeded|always, value }, fanOutOver?: 'node.listField', handoffFrom?: 'node.field' }. Start is \"__start__\", End is \"__end__\". An edge back to an earlier node makes a cycle; give the looping node a maxVisits.",
       "Shipped templates cannot be overwritten — save under a new id. Set overwrite: true to replace an existing graph of the user's.",
@@ -1703,7 +2159,7 @@ export default function graphStudio(bb: BbPluginApi) {
       json: z.string().min(2).max(200_000),
       overwrite: z.boolean().optional(),
     }),
-    execute: async ({ json, overwrite }) => {
+    execute: async ({ json, overwrite }, ctx) => {
       let graph: Graph;
       try {
         graph = fromGraphFile(json);
@@ -1712,6 +2168,11 @@ export default function graphStudio(bb: BbPluginApi) {
       }
       if (TEMPLATES.some((entry) => entry.id === graph.id)) {
         return `"${graph.id}" is a shipped template. Save it under a different id.`;
+      }
+      try {
+        await assertMembersReachable(graph, ctx.projectId ?? null);
+      } catch (cause) {
+        return `Not saved. ${cause instanceof Error ? cause.message : String(cause)}`;
       }
       const existing = store.getGraph(graph.id);
       if (existing && !overwrite) {
@@ -1760,7 +2221,9 @@ export default function graphStudio(bb: BbPluginApi) {
           id: graph.id,
           title: graph.name,
           subtitle: graph.example || `${graph.nodes.length} nodes`,
-          icon: "Workflow",
+          // Registered by the app bundle (components/graph-studio-icon.tsx);
+          // the host falls back to the branding icon when it is not loaded.
+          icon: GRAPH_STUDIO_ICON,
         })),
     resolve: (itemId) => {
       const graph = resolveGraph(itemId);
@@ -1833,31 +2296,59 @@ export default function graphStudio(bb: BbPluginApi) {
   // whatever of their workers survived the reload. The checkpoint stays, so
   // `rerunFrom` remains possible afterwards.
   bb.background.service("resume-orphans", {
-    // Resumes once on load, then stays parked until the host aborts. A
-    // service that returns early is reported as stopped, so the wait is what
-    // keeps the plugin's status honest.
+    // Sweeps once on load, then every heartbeat until the host aborts. The
+    // repeat is what lets a run whose claim is still held by a dying driver
+    // — a reload's predecessor, a crashed process — be taken over once that
+    // claim is released or expires, instead of staying `running` forever.
+    // A service that returns early is reported as stopped, so the wait is
+    // also what keeps the plugin's status honest.
     start(signal: AbortSignal) {
-      for (const row of store.listRunsByStatus("stopping")) {
-        bb.log.info(`Settling stopped run ${row.id} after reload.`);
-        store.updateRun(
-          row.id,
-          { status: "stopped", state: row.state, error: row.error },
-          Date.now(),
-        );
-        publish();
-        void interruptWorkers(row.id).then(() =>
-          farewellWorkers(row.id, "stopped", row.error),
-        );
-      }
-      for (const row of store.listRunsByStatus("running")) {
-        bb.log.info(`Resuming run ${row.id} after reload.`);
-        void drive(row.id);
-      }
+      const sweep = () => {
+        if (disposed || signal.aborted) return;
+        for (const row of store.listRunsByStatus("stopping")) {
+          if (!store.claimRun(row.id, driverId, Date.now(), CLAIM_EXPIRY_MS)) continue;
+          if (driving.has(row.id)) continue;
+          bb.log.info(`Settling stopped run ${row.id} after reload.`);
+          store.updateRun(
+            row.id,
+            { status: "stopped", state: row.state, error: row.error },
+            Date.now(),
+          );
+          store.releaseRun(row.id, driverId);
+          publish();
+          void interruptWorkers(row.id).then(() =>
+            farewellWorkers(row.id, "stopped", row.error),
+          );
+        }
+        for (const row of store.listRunsByStatus("running")) {
+          if (driving.has(row.id)) continue;
+          void drive(row.id, undefined, undefined, `Resuming run ${row.id} after reload.`);
+        }
+      };
+      sweep();
+      const timer = setInterval(sweep, CLAIM_HEARTBEAT_MS);
+      (timer as { unref?: () => void }).unref?.();
       return new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        signal.addEventListener("abort", () => resolve(), { once: true });
+        const done = () => {
+          clearInterval(timer);
+          resolve();
+        };
+        if (signal.aborted) return done();
+        signal.addEventListener("abort", done, { once: true });
       });
     },
+  });
+
+  // On reload or disable the old instance's promises live on. Left alone,
+  // they keep walking their runs next to the successor — the double resume
+  // of BBP-16. Give every claim back now, so the successor's sweep takes the
+  // runs over at once instead of after the expiry.
+  bb.onDispose(() => {
+    disposed = true;
+    for (const runId of [...driving.keys()]) {
+      abandon(runId, "the plugin is reloading");
+      unclaim(runId);
+    }
   });
 }
 
