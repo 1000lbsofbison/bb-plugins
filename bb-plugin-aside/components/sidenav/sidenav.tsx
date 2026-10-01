@@ -904,9 +904,15 @@ export function Sidenav({
                           }
                         />
                       )}
-                      {sectionCollapsed
-                        ? null
-                        : renderFamilies(sectionBlock.families, block.project.id)}
+                      {sectionCollapsed ? null : key === null ? (
+                        renderFamilies(sectionBlock.families, block.project.id)
+                      ) : (
+                        // Indent a section's threads behind a guide line so it is
+                        // visible where the section ends.
+                        <div className="mb-1 ml-3 border-l border-sidebar-border pl-1">
+                          {renderFamilies(sectionBlock.families, block.project.id)}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
