@@ -2,8 +2,8 @@
  * The RPC contract between the server entry and the host worker.
  *
  * Shared by both sides so a rename breaks the build rather than a recording.
- * BB's own `ai.voice.transcribe` is answered by the same worker but declared
- * elsewhere — see the note on `hostContract` for why it cannot live here.
+ * BB's microphone reaches the worker through `transcribeAudio`: the server
+ * registers the AI service and forwards each recording here.
  */
 
 import { defineRpcContract, type ExperimentalHostSignals } from "@get-bb/plugin-sdk";
@@ -79,7 +79,7 @@ export type SetupState = z.infer<typeof setupStateSchema>;
 /**
  * Settings the host needs but cannot be told per call.
  *
- * BB's `ai.voice.transcribe` carries no language, so the choice has to reach
+ * BB's transcription call carries no language, so the choice has to reach
  * the worker some other way. The server pushes it here whenever the plugin's
  * settings change and the host keeps it on disk, because core may start a
  * fresh worker for a transcription without the server saying anything first.
@@ -95,14 +95,7 @@ export const hostConfigSchema = z.object({
 });
 export type HostConfig = z.infer<typeof hostConfigSchema>;
 
-/**
- * The plugin's own host methods.
- *
- * BB's `ai.voice.transcribe` is deliberately *not* folded in here. Its schema
- * lives in `@get-bb/plugin-sdk/ai-services`, a subpath only host artifacts can
- * resolve — importing it from a file the server entry also loads fails the
- * plugin load outright. The host merges the two contracts on its own side.
- */
+/** The plugin's host methods. */
 export const hostContract = defineRpcContract({
   /** Everything the settings page renders, in one round trip. */
   state: {
@@ -162,6 +155,23 @@ export const hostContract = defineRpcContract({
    * reads the file on the host rather than shipping base64 through RPC, so it
    * is also the only way to try a recording larger than the 8 MiB call limit.
    */
+  /**
+   * One recording from BB's microphone, forwarded by the server's AI service.
+   * Failures come back as `error` rather than a thrown RPC error so the user
+   * sees the plugin's message ("download the model first"), not a transport one.
+   */
+  transcribeAudio: {
+    input: z.object({
+      audioBase64: z.string(),
+      mimeType: z.string(),
+      modelId: z.string(),
+    }),
+    output: z.object({
+      text: z.string().nullable(),
+      error: z.string().nullable(),
+    }),
+  },
+
   transcribeFile: {
     input: z.object({ path: z.string(), modelId: z.string() }),
     output: z.object({

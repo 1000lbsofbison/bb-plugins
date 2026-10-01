@@ -209,23 +209,20 @@ function SetupCard({
           )}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          BB reads its transcription service from the environment, so this one
-          value has to be set outside the app. Set it, restart BB, and the
-          microphone in the composer uses the model below.
+          Pick Listen for voice input in Settings → AI services, or run this
+          command. The microphone in the composer then uses the model below.
         </p>
         <div className="mt-2 flex items-center gap-2">
           <Input
             readOnly
-            value={`BB_TRANSCRIPTION=${transcriptionSetting}`}
-            aria-label="Environment variable to set"
+            value={transcriptionSetting}
+            aria-label="Command that selects this plugin"
             className="font-mono text-xs"
           />
           <Button
             variant="secondary"
             onClick={() => {
-              void navigator.clipboard.writeText(
-                `BB_TRANSCRIPTION=${transcriptionSetting}`,
-              );
+              void navigator.clipboard.writeText(transcriptionSetting);
             }}
           >
             Copy

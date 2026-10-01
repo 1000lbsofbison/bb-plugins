@@ -2,9 +2,8 @@
  * The host worker: everything native, everything large.
  *
  * It runs on the machine that owns the microphone recording, loads the
- * sherpa-onnx addon, keeps the model files, and answers BB's
- * `ai.voice.transcribe` whenever this plugin is the configured transcription
- * service. The server entry never touches any of it — a bundled server cannot
+ * sherpa-onnx addon, keeps the model files, and transcribes the recordings
+ * the server's AI service forwards whenever BB picks this plugin for voice. The server entry never touches any of it — a bundled server cannot
  * carry a native addon, and this worker can.
  *
  * Downloads and the runtime install run detached from the call that starts
@@ -17,8 +16,6 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { defineRpcContract } from "@get-bb/plugin-sdk";
-import { experimental_aiServicesHostContract } from "@get-bb/plugin-sdk/ai-services";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import {
   hostConfigSchema,
@@ -231,15 +228,6 @@ function describeSetup(directory: string): SetupState {
   };
 }
 
-/**
- * What this worker answers: BB's AI-service methods plus the plugin's own.
- * One worker serves both, and only this file may name the AI-services subpath.
- */
-const workerContract = defineRpcContract({
-  ...experimental_aiServicesHostContract,
-  ...hostContract,
-});
-
 /** Why a transcription could not be attempted, phrased for the user. */
 interface NotReady {
   code: "request_failed" | "service_unavailable";
@@ -262,7 +250,7 @@ async function transcribe(
   if (model === undefined) {
     return {
       code: "request_failed",
-      message: `Unknown model "${modelId}". Pick one on the Listen settings page and set BB_TRANSCRIPTION to it.`,
+      message: `Unknown model "${modelId}". Pick one on the Listen settings page.`,
     };
   }
 
@@ -300,26 +288,25 @@ async function transcribe(
 }
 
 export default experimental_defineHostEntry({
-  contract: workerContract,
+  contract: hostContract,
   experimental_signals: hostSignals,
   handlers: {
     // ─── BB's transcription service ────────────────────────────────────────
     //
-    // Failures are returned, never thrown: core keys its retry policy on the
-    // code, and a thrown error would read as an unavailable service rather
-    // than "you have not picked a model yet".
-    "ai.voice.transcribe": async (input, context) => {
+    // Failures are returned, never thrown: a thrown error would reach the
+    // user as a transport failure rather than "download the model first".
+    transcribeAudio: async (input, context) => {
       const directory = useDataDir(context.experimental_paths.dataDir);
       const result = await transcribe(
         directory,
-        input.model,
+        input.modelId,
         Buffer.from(input.audioBase64, "base64"),
         input.mimeType,
         context.signal,
       );
       return "text" in result
-        ? { ok: true as const, model: input.model, text: result.text }
-        : { ok: false as const, code: result.code, message: result.message };
+        ? { text: result.text, error: null }
+        : { text: null, error: result.message };
     },
 
     transcribeFile: async ({ path, modelId }, context) => {
@@ -348,14 +335,6 @@ export default experimental_defineHostEntry({
         ? { text: result.text, error: null, milliseconds: Date.now() - started }
         : { text: null, error: result.message, milliseconds: Date.now() - started };
     },
-
-    // Registered for `voice` only. Core still builds against the full
-    // contract, so the method must exist and must refuse politely.
-    "ai.inference.complete": async () => ({
-      ok: false as const,
-      code: "request_failed" as const,
-      message: "Listen transcribes speech; it does not serve inference.",
-    }),
 
     // ─── The settings page ─────────────────────────────────────────────────
 

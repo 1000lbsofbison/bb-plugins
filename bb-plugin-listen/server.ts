@@ -24,8 +24,9 @@ import {
 import { shouldSpeak, speaksAloud, spokenText } from "./lib/speech/decide.js";
 import { condenseWithApi, CondenseApiError } from "./lib/speech/condense-api.js";
 import { previewText } from "./lib/speech/preview-text.js";
+import { isSelectedForVoice, selectCommand, transcriptOrThrow } from "./lib/ai-service.js";
 
-/** The service id half of `BB_TRANSCRIPTION=<id>/<model>`. */
+/** The AI-service id BB's voice selection names (`bb settings ai-services set voice listen`). */
 export const SERVICE_ID = "listen";
 
 /** Realtime channel the settings page refetches on. */
@@ -75,9 +76,9 @@ export const rpcContract = defineRpcContract({
       config: hostConfigSchema,
       speak: z.boolean(),
       summarize: z.boolean(),
-      /** What the user must put in BB_TRANSCRIPTION, assembled for copying. */
+      /** The command that points BB's voice input here, assembled for copying. */
       transcriptionSetting: z.string(),
-      /** Whether BB is currently pointed at this plugin. */
+      /** Whether BB's voice task is pinned to this plugin. */
       active: z.boolean(),
     }),
   },
@@ -168,11 +169,6 @@ export const rpcContract = defineRpcContract({
 });
 
 export default async function plugin(bb: BbPluginApi) {
-  bb.experimental_aiServices.register({
-    id: SERVICE_ID,
-    displayName: "Listen (offline speech)",
-    kinds: ["voice"],
-  });
 
   const settings = bb.settings.define({
     language: {
@@ -186,7 +182,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Recognition model",
       description:
-        "The model id to transcribe with. Must match the one in BB_TRANSCRIPTION.",
+        "The model id BB's microphone transcribes with.",
       default: "parakeet-v3",
     },
     speak: {
@@ -303,6 +299,28 @@ export default async function plugin(bb: BbPluginApi) {
   ) {
     return host.call(method, input, { hostId: await hostId() });
   }
+
+  // BB offers a service for voice input when it declares `transcribe`; the
+  // recording is decoded and recognised on the host, where the native runtime
+  // and the models live. Speaking aloud is not an AI-service task — BB has no
+  // such slot — so it stays the plugin's own feature.
+  bb.experimental_aiServices.register({
+    id: SERVICE_ID,
+    displayName: "Listen (offline speech)",
+    transcribe: async (audio, { signal }) => {
+      const { model } = await settings.get();
+      const result = await host.call(
+        "transcribeAudio",
+        {
+          audioBase64: Buffer.from(await audio.arrayBuffer()).toString("base64"),
+          mimeType: audio.type || "audio/webm",
+          modelId: model,
+        },
+        { hostId: await hostId(), signal },
+      );
+      return transcriptOrThrow(result);
+    },
+  });
 
   /** Push what the host cannot be told per call. */
   async function pushConfig(): Promise<void> {
@@ -549,14 +567,13 @@ export default async function plugin(bb: BbPluginApi) {
     state: async () => {
       const [state, config, values] = await Promise.all([
         callHost("state", null),
-        bb.sdk.system.config(),
+        bb.sdk.system.aiServices(),
         settings.get(),
       ]);
-      const wanted = `${SERVICE_ID}/${values.model}`;
       return {
         ...state,
-        transcriptionSetting: wanted,
-        active: config.aiServices.transcription === wanted,
+        transcriptionSetting: selectCommand(SERVICE_ID),
+        active: isSelectedForVoice(config.selections.voice, bb.pluginId, SERVICE_ID),
         speak: values.speak,
         summarize: values.summarize,
       };
@@ -676,12 +693,14 @@ export default async function plugin(bb: BbPluginApi) {
         case "status": {
           const state = await callHost("state", null);
           const values = await settings.get();
-          const config = await bb.sdk.system.config();
-          const wanted = `${SERVICE_ID}/${values.model}`;
+          const services = await bb.sdk.system.aiServices();
+          const voice = services.selections.voice;
+          const active = isSelectedForVoice(voice, bb.pluginId, SERVICE_ID);
+          const command = selectCommand(SERVICE_ID);
           if (json) {
             return {
               exitCode: 0,
-              stdout: JSON.stringify({ ...state, transcriptionSetting: wanted }),
+              stdout: JSON.stringify({ ...state, transcriptionSetting: command, active, model: values.model }),
             };
           }
           const installed = state.sttModels.filter((model) => model.installed);
@@ -692,7 +711,8 @@ export default async function plugin(bb: BbPluginApi) {
               `runtime:       ${state.setup.runtime.installed ? `installed (${state.setup.runtime.source})` : "not installed"}`,
               `ffmpeg:        ${state.setup.ffmpeg ? "found" : "not on PATH"}`,
               `language:      ${state.config.language}`,
-              `BB uses:       ${config.aiServices.transcription}${config.aiServices.transcription === wanted ? "" : `  (set BB_TRANSCRIPTION=${wanted} to use this plugin)`}`,
+              `BB voice:      ${voice.mode === "service" ? `${voice.pluginId}/${voice.serviceId}` : voice.mode}${active ? "" : `  (run \`${command}\` to use this plugin)`}`,
+              `model:         ${values.model}`,
               `models ready:  ${installed.length === 0 ? "none" : installed.map((model) => `${model.id} (${model.source})`).join(", ")}`,
               ...(running.length === 0
                 ? []
