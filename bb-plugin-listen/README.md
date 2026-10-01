@@ -28,14 +28,15 @@ Open the plugin's settings page in BB and work down it:
    per machine. If you already run pi-listen, its copy is used instead.
 2. **Download a recognition model** — `parakeet-v3` handles 25 languages and
    is the default. The list shows size, languages and ratings.
-3. **Point BB at the plugin** — BB reads its transcription service from the
-   environment, which the app cannot set for you:
+3. **Point BB at the plugin** — pick *Listen* for voice input in Settings →
+   AI services, or run:
 
    ```sh
-   export BB_TRANSCRIPTION=listen/parakeet-v3
+   bb settings ai-services set voice listen
    ```
 
-   Restart BB. `bb settings ai-services` confirms it.
+   `bb settings ai-services show` confirms it. The model is the one chosen in
+   the plugin's settings.
 
 4. **For speaking**, install a voice in the same page and turn on *Read
    answers aloud*. Match the voice to your language — a German voice refuses

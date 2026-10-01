@@ -79,8 +79,36 @@ export type RuntimeHost = {
     visit: number,
     session: { threadId: string; turns: number },
   ): Promise<void>;
+  /**
+   * Member nodes: deliver the step to a persistent Crew member (plugin
+   * `crew`) instead of spawning a worker. Idempotent per
+   * `(nodeId, visit, attempt)`: the host remembers what it sent, so a resume
+   * after a crash finds the message again instead of sending it twice.
+   * Optional because only the real host can reach another plugin; a host
+   * without it fails the node rather than quietly spawning a fresh thread.
+   */
+  sendToMember?(args: {
+    nodeId: string;
+    visit: number;
+    attempt: number;
+    address: string;
+    body: string;
+  }): Promise<{ messageId: string; threadId: string | null }>;
+  /** Resolve with the member's answer to that message, or reject if it failed. */
+  awaitMemberReply?(args: {
+    nodeId: string;
+    visit: number;
+    attempt: number;
+    messageId: string;
+  }): Promise<{ text: string; threadId: string | null }>;
   /** Record-keeping hooks; all persistence lives outside the runtime. */
   onNodeStart(nodeId: string): Promise<string>;
+  /**
+   * Agent nodes: the worker thread already attached to this attempt, when a
+   * new driver took the run over while that worker was still alive (BBP-20).
+   * The runtime then awaits it instead of spawning. Null = spawn as usual.
+   */
+  adoptedThread?(nodeRunId: string): string | null;
   /**
    * The worker this attempt got, reported the moment it exists rather than
    * with the result. Everything a reader wants during the minutes a node runs
@@ -430,6 +458,105 @@ export function compileGraph(
         }
       }
 
+      /**
+       * The end of a node that routes its failure: record why, carry on. Nothing
+       * is written to `outputs`, so `{{node}}` renders empty downstream.
+       */
+      const routeFailure = async (lastError: string): Promise<Partial<State>> => {
+        host.log(
+          `"${node.label}" gave up after ${node.maxAttempts} ${node.maxAttempts === 1 ? "attempt" : "attempts"}: ${lastError}. The run carries on along its failure edge.`,
+        );
+        await host.onStateChange({
+          ...runState,
+          errors: { ...runState.errors, [node.id]: lastError },
+          visits: { ...runState.visits, [node.id]: visits },
+          steps,
+        });
+        return {
+          errors: { [node.id]: lastError },
+          visits: { [node.id]: visits },
+          steps,
+        };
+      };
+
+      // A member node hands the step to a Crew member's existing thread. It
+      // counts its attempts itself instead of leaving them to a LangGraph
+      // retry policy, because the attempt number is part of the message's
+      // correlation id: it has to be the same after a crash and a resume
+      // (so nothing is sent twice) and different for a deliberate retry (so
+      // the retry is not answered with the reply that just failed).
+      if (node.kind === "member") {
+        let lastError = "";
+        for (let tries = 1; tries <= node.maxAttempts; tries += 1) {
+          const nodeRunId = await host.onNodeStart(node.id);
+          let threadId: string | null = null;
+          try {
+            if (!host.sendToMember || !host.awaitMemberReply) {
+              throw new Error(
+                `"${node.label}" is a Crew member node, but this host cannot reach Crew members.`,
+              );
+            }
+            const sent = await host.sendToMember({
+              nodeId: node.id,
+              visit: visits,
+              attempt: tries,
+              address: node.member.trim(),
+              body: composeNodePrompt(node, runState, knownNodes),
+            });
+            threadId = sent.threadId;
+            if (threadId) await host.onNodeThread(nodeRunId, threadId);
+            const reply = await host.awaitMemberReply({
+              nodeId: node.id,
+              visit: visits,
+              attempt: tries,
+              messageId: sent.messageId,
+            });
+            threadId = reply.threadId ?? threadId;
+            const output = reply.text;
+            const fields = parseFields(node.fields, output);
+            await host.onNodeFinish(nodeRunId, {
+              status: "done",
+              childThreadId: threadId,
+              output,
+              error: null,
+            });
+            await host.onStateChange({
+              ...runState,
+              outputs: { ...runState.outputs, [node.id]: output },
+              fields: { ...runState.fields, [node.id]: fields },
+              ...(node.onError === "route"
+                ? { errors: { ...runState.errors, [node.id]: "" } }
+                : {}),
+              visits: { ...runState.visits, [node.id]: visits },
+              steps,
+            });
+            return {
+              outputs: { [node.id]: output },
+              ...(node.fields.length > 0 ? { fields: { [node.id]: fields } } : {}),
+              ...(node.onError === "route" ? { errors: { [node.id]: "" } } : {}),
+              visits: { [node.id]: visits },
+              steps,
+            };
+          } catch (cause) {
+            if (isGraphBubbleUp(cause)) throw cause;
+            const raw = cause instanceof Error ? cause.message : String(cause);
+            lastError = raw.trim() === "" ? "The node failed without a message." : raw;
+            await host.onNodeFinish(nodeRunId, {
+              status: "failed",
+              childThreadId: threadId,
+              output: null,
+              error: lastError,
+            });
+            if (cause instanceof GuardStop) throw cause;
+            if (tries < node.maxAttempts) {
+              await (host.wait ?? defaultWait)(1_000 + Math.random() * 1_000);
+            }
+          }
+        }
+        if (node.onError !== "route") throw new Error(lastError);
+        return await routeFailure(lastError);
+      }
+
       // The attempt number is owned by the host: LangGraph re-invokes this
       // function on a retry with the same state, so deriving it from `visits`
       // would label every retry as the same attempt.
@@ -437,14 +564,20 @@ export function compileGraph(
         const nodeRunId = await host.onNodeStart(node.id);
         let childThreadId: string | null = null;
         try {
-          childThreadId = await host.spawn({
-            prompt: composeNodePrompt(node, runState, knownNodes),
-            title: node.label.slice(0, 80),
-            nodeId: node.id,
-            skills: node.skills,
-            execution: nodeExecution(node),
-          });
-          await host.onNodeThread(nodeRunId, childThreadId);
+          // A takeover hands back the previous driver's still-living worker
+          // for this attempt; waiting on it is the same wait as below, so the
+          // node finishes with that worker's answer instead of paying for it twice.
+          childThreadId = host.adoptedThread?.(nodeRunId) ?? null;
+          if (childThreadId === null) {
+            childThreadId = await host.spawn({
+              prompt: composeNodePrompt(node, runState, knownNodes),
+              title: node.label.slice(0, 80),
+              nodeId: node.id,
+              skills: node.skills,
+              execution: nodeExecution(node),
+            });
+            await host.onNodeThread(nodeRunId, childThreadId);
+          }
           const output = await host.awaitThread(childThreadId);
           // Parsing before recording: a broken contract is a failed attempt, so
           // the retry policy gives the worker another go instead of writing
@@ -533,20 +666,7 @@ export function compileGraph(
           }
         }
       }
-      host.log(
-        `"${node.label}" gave up after ${node.maxAttempts} ${node.maxAttempts === 1 ? "attempt" : "attempts"}: ${lastError}. The run carries on along its failure edge.`,
-      );
-      await host.onStateChange({
-        ...runState,
-        errors: { ...runState.errors, [node.id]: lastError },
-        visits: { ...runState.visits, [node.id]: visits },
-        steps,
-      });
-      return {
-        errors: { [node.id]: lastError },
-        visits: { [node.id]: visits },
-        steps,
-      };
+      return await routeFailure(lastError);
     }, retryPolicy ? { retryPolicy } : undefined);
   }
 

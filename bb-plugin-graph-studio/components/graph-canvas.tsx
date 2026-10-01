@@ -172,12 +172,30 @@ const STATUS_DOT: Record<NodeVisualStatus, string> = {
 type Chip = { key: string; text: string; title?: string; strong?: boolean; quiet?: boolean };
 
 /**
+ * The kind colour of a member node. The only kind with one, because it is the
+ * only kind whose card stands for something outside the graph — a persistent
+ * thread that outlives the run — and that must be visible before anyone reads
+ * the kind line. Kept off `node.color`, which stays the user's own choice.
+ */
+export const MEMBER_ACCENT = "#0AC5B3";
+
+/**
  * The facts a card has room for, most telling first: which model, how hard it
  * thinks, which skills it follows, what it hands on. Anything left at its
  * default stays off the card — a chip that is always there says nothing.
  */
 export function nodeChips(node: GraphNode, execution: NodeExecution | null): Chip[] {
   const chips: Chip[] = [];
+  // A member node's "model" is who does the step: the address is the fact
+  // that tells two member nodes apart.
+  if (node.kind === "member") {
+    const address = node.member.trim();
+    chips.push(
+      address
+        ? { key: "member", text: address, title: `Crew member ${address}`, strong: true }
+        : { key: "member", text: "no member", title: "Choose a member@crew", quiet: true },
+    );
+  }
   if (spawnsThread(node)) {
     if (execution) {
       chips.push({
@@ -353,7 +371,16 @@ function StepView({ data }: NodeProps<StepNode>) {
           background: STATUS_FILL[status],
           border: `${selected ? 2.5 : 1.5}px solid ${selected ? "var(--primary)" : STATUS_STROKE[status]}`,
         }}
+        data-kind={node.kind}
       >
+        {node.kind === "member" ? (
+          <span
+            aria-hidden
+            data-testid="member-accent"
+            className="pointer-events-none absolute inset-x-0 top-0 h-[3px] rounded-t-[10px]"
+            style={{ background: MEMBER_ACCENT }}
+          />
+        ) : null}
         {/* The user's colour as a spine plus a faint wash — enough to group
             cards at a glance, too little to fight the status colours. */}
         {node.color ? (

@@ -17,7 +17,9 @@ type Draft = {
     id: string;
     label: string;
     prompt: string;
-    kind?: "agent" | "dialog" | "human" | "note" | "subgraph";
+    kind?: "agent" | "dialog" | "human" | "note" | "subgraph" | "member";
+    /** `member` only: the Crew member doing the step, `member@crew`. */
+    member?: string;
     /** `subgraph` only: the graph embedded at this node. */
     graphId?: string;
     skills?: string[];
@@ -44,6 +46,14 @@ type Draft = {
     handoffFrom?: string;
   }>;
 };
+
+/**
+ * The crew name `owner-check-loop` ships with. A template is code and cannot
+ * know the user's crew, so the shipped copy names a placeholder: clone it and
+ * replace `my-crew` in both member nodes — or build the graph for a named
+ * crew with `ownerCheckLoopFor`.
+ */
+export const OWNER_CHECK_PLACEHOLDER_CREW = "my-crew";
 
 function build(draft: Draft): Graph {
   return graphSchema.parse({
@@ -2577,8 +2587,77 @@ export const TEMPLATES: Graph[] = [
   // Work — both ends
   projectEndToEnd,
 ].map(build);
+// Built by its own function rather than as a Draft in the list above, so the
+// same graph can be made for a named crew. Last, after the other work flows:
+// it is the only template that needs another plugin.
+TEMPLATES.push(ownerCheckLoopFor(OWNER_CHECK_PLACEHOLDER_CREW));
 
 
+
+/**
+ * A graph that runs on a Crew (plugin `crew`) instead of fresh threads: the
+ * crew's owner builds, its checker checks, a `fail` goes back to the owner.
+ * Both members keep their memory from lap to lap and from run to run, which
+ * is the point — the checker remembers what it complained about last time.
+ * After three laps the loop gives up and a person decides.
+ */
+export function ownerCheckLoopFor(crew: string): Graph {
+  return build({
+    id: "owner-check-loop",
+    name: "Owner–check loop (on a crew)",
+    description: `Runs on a crew instead of fresh threads: member dev-owner builds, member dev-check checks, "fail" goes back to the owner — at most three laps, then you decide. Needs the Crew plugin; clone it and replace "${OWNER_CHECK_PLACEHOLDER_CREW}" with your crew's name.`,
+    example: "Add input validation to the signup form",
+    maxSteps: 12,
+    nodes: [
+      {
+        id: "owner",
+        label: "Owner builds",
+        kind: "member",
+        member: `dev-owner@${crew}`,
+        maxVisits: 3,
+        prompt:
+          "Carry out this task in the working tree. Do not commit.\n\nTask:\n{{input}}\n\nIf the check already sent findings back, work them in:\n{{check}}\n\nEnd with a short summary of what you changed.",
+      },
+      {
+        id: "check",
+        label: "Check",
+        kind: "member",
+        member: `dev-check@${crew}`,
+        maxVisits: 3,
+        prompt:
+          "Check the owner's work against the task. Read the changed code; run the tests that matter.\n\nTask:\n{{input}}\n\nThe owner's summary:\n{{owner}}\n\nAnswer pass only if the task is done and nothing you found needs changing.",
+        fields: [
+          {
+            name: "verdict",
+            type: "enum",
+            options: ["pass", "fail"],
+            description: "pass carries on to the approval, fail goes back to the owner",
+          },
+          { name: "findings", type: "string", description: "what has to change; empty on pass" },
+        ],
+      },
+      {
+        id: "gate",
+        label: "Your decision",
+        kind: "human",
+        prompt:
+          "The check says: {{check}}\n\nAccept the change as it is in the working tree?",
+      },
+    ],
+    edges: [
+      { from: START_NODE, to: "owner" },
+      { from: "owner", to: "check" },
+      {
+        from: "check",
+        to: "owner",
+        when: { source: "field", key: "check.verdict", op: "equals", value: "fail" },
+        label: "fail",
+      },
+      { from: "check", to: "gate", label: "pass, or out of laps" },
+      { from: "gate", to: END_NODE },
+    ],
+  });
+}
 
 /**
  * What a template is for. The library mixes two quite different things, and a
@@ -2630,6 +2709,7 @@ const GROUP_OF: Record<string, TemplateGroup> = {
   "dev-bugfix": "work",
   "dev-refactor": "work",
   "project-end-to-end": "work",
+  "owner-check-loop": "work",
 };
 
 /**
@@ -2704,6 +2784,7 @@ const SECTION_OF: Record<string, TemplateSection> = {
   "dev-bugfix": "work-building",
   "dev-refactor": "work-building",
   "project-end-to-end": "work-both-ends",
+  "owner-check-loop": "work-building",
 };
 
 /** A template's finer shelf, or `null` for an id the library does not ship. */

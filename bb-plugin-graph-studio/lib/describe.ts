@@ -163,6 +163,7 @@ function describeNode(node: GraphNode): string {
           .join(", ")}`
       : "") +
     (node.kind === "subgraph" ? `  graph: ${node.graphId}` : "") +
+    (node.kind === "member" ? `  member: ${node.member.trim() || "(none)"}` : "") +
     // Without this the listing shows the same edges for an exclusive choice
     // and an inclusive or, and the two behave completely differently.
     (node.routing === "every" ? "  every matching branch" : "") +

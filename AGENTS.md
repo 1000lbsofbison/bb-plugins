@@ -1,13 +1,14 @@
 # Working in this repository
 
-Four BB plugins as standalone npm packages, deliberately **without** workspace
+Five BB plugins as standalone npm packages, deliberately **without** workspace
 tooling on top — they share no dependency.
 
 | Folder | Plugin | State |
 | --- | --- | --- |
-| `bb-plugin-graph-studio` | `graph-studio` | active development, 461 tests |
-| `bb-plugin-aside` | `aside` | sidenav replacement, 151 tests |
-| `bb-plugin-listen` | `listen` | offline speech in and out, 63 tests |
+| `bb-plugin-graph-studio` | `graph-studio` | active development, 660 tests |
+| `bb-plugin-crew` | `crew` | persistent agent teams, new, 364 tests |
+| `bb-plugin-aside` | `aside` | sidenav replacement, 176 tests |
+| `bb-plugin-listen` | `listen` | offline speech in and out, 77 tests |
 | `bb-plugin-slim-nav` | `slim-nav` | finished, resting, no tests |
 
 ## Where to work

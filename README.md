@@ -3,14 +3,15 @@
 [![CI](https://github.com/sajov/bb-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/sajov/bb-plugins/actions/workflows/ci.yml)
 [![Known Vulnerabilities](https://snyk.io/test/github/sajov/bb-plugins/badge.svg)](https://snyk.io/test/github/sajov/bb-plugins)
 
-Four plugins for [BB](https://github.com/get-bb). One repository, because they
+Five plugins for [BB](https://github.com/get-bb). One repository, because they
 share a toolchain and a set of conventions — not because they belong together.
 
 | Plugin | What it does | Tests |
 | --- | --- | --- |
-| [Graph Studio](bb-plugin-graph-studio/) | Build agent graphs that may contain cycles, run them, and watch them live. A node is a BB thread, not a model call. | 461 |
-| [Aside](bb-plugin-aside/) | A replacement for BB's thread list. Focus through order and collapsing instead of filters. | 151 |
-| [Listen](bb-plugin-listen/) | Speech in and out, fully offline with open models. Dictate in the composer, have answers read aloud. | 63 |
+| [Graph Studio](bb-plugin-graph-studio/) | Build agent graphs that may contain cycles, run them, and watch them live. A node is a BB thread, not a model call. | 660 |
+| [Crew](bb-plugin-crew/) | Persistent agent teams from a `crew.yaml`: members with fixed addresses, messaging, a work queue, several crews per project. | 364 |
+| [Aside](bb-plugin-aside/) | A replacement for BB's thread list. Focus through order and collapsing instead of filters. | 176 |
+| [Listen](bb-plugin-listen/) | Speech in and out, fully offline with open models. Dictate in the composer, have answers read aloud. | 77 |
 | [Slim Nav](bb-plugin-slim-nav/) | Icon-only sidebar navigation with adjustable density. | — |
 
 The screenshots below are captures from a running instance; the project, file
@@ -34,6 +35,26 @@ evaluator–optimizer loops, supervisors, swarms and sagas.
 ```sh
 bb plugin install git:https://github.com/sajov/bb-plugins.git \
   --subdirectory bb-plugin-graph-studio
+```
+
+## Crew
+
+![Crew project overview](docs/screenshots/crew-overview.png)
+
+![Crew topology with member card](docs/screenshots/crew-details.png)
+
+A persistent agent team: a lead and members with fixed addresses
+(`dev-owner@my-crew`), each with its own provider and model, reconciled
+against BB threads with `bb crew apply`. Members message each other and share
+a work queue; several crews in one project coordinate through their leads, BB
+Tasks and `main`. A Graph Studio `member` node runs a graph step on a crew
+member instead of a fresh thread.
+Every message, also between crews, is visible in the project feed and with
+`bb crew log --cross-crew`.
+
+```sh
+bb plugin install git:https://github.com/sajov/bb-plugins.git \
+  --subdirectory bb-plugin-crew
 ```
 
 ## Aside

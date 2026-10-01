@@ -6,6 +6,7 @@ import {
 } from "./components/graph-studio-panel";
 import { GraphStudioRunBanner } from "./components/run-banner";
 import { GraphRunCard } from "./components/run-card";
+import { GRAPH_STUDIO_ICON, GraphStudioFlow } from "./components/graph-studio-icon";
 
 /** `params` crosses the host boundary as JSON — read it, never trust it. */
 function runIdFrom(params: unknown): string | null {
@@ -15,10 +16,12 @@ function runIdFrom(params: unknown): string | null {
 }
 
 export default definePluginApp((app) => {
+  // One glyph everywhere, the same as the sidebar's branding icon.
+  app.experimental_icons.register({ name: GRAPH_STUDIO_ICON, component: GraphStudioFlow });
   app.slots.navPanel({
     id: "studio",
     title: "Graph Studio",
-    icon: "Workflow",
+    icon: GRAPH_STUDIO_ICON,
     path: "studio",
     component: () => <GraphStudioPanel />,
   });
@@ -26,7 +29,7 @@ export default definePluginApp((app) => {
   app.slots.threadPanelAction({
     id: "studio",
     title: "Graph Studio",
-    icon: "Workflow",
+    icon: GRAPH_STUDIO_ICON,
     layout: "flush",
     run: async ({ openPanel }) => {
       openPanel({ title: "Graph Studio" });

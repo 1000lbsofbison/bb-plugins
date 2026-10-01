@@ -114,6 +114,7 @@ export const NODE_KINDS = [
   "human",
   "note",
   "subgraph",
+  "member",
 ] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
@@ -124,6 +125,7 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   human: "Approval",
   note: "Note",
   subgraph: "Subgraph",
+  member: "Crew member",
 };
 
 /**
@@ -231,6 +233,14 @@ export const nodeSchema = z.object({
    */
   graphId: z.string().trim().max(48).default(""),
   /**
+   * `member` only: the persistent Crew member that does this step, written
+   * `member@crew` (plugin `crew`). The step is delivered to that member's
+   * existing thread instead of spawning a worker, so the member keeps its
+   * memory across visits and runs. Provider and model belong to the crew file,
+   * not to the graph — a member node carries none.
+   */
+  member: z.string().trim().max(200).default(""),
+  /**
    * Optional explicit execution; unset inherits the parent thread. The four
    * fields are one decision, not four: BB only honours a model together with
    * the provider it belongs to, so half a selection is dropped rather than
@@ -272,6 +282,10 @@ export type NodeExecution = {
  * `validateGraph`; here it can only mean a graph that was never validated.
  */
 export function nodeExecution(node: GraphNode): NodeExecution | null {
+  // A member runs on the provider and model its crew file gave it. Anything
+  // named on the node would be checked against a catalogue and then ignored,
+  // so it is not an execution at all.
+  if (node.kind === "member") return null;
   const providerId = (node.providerId ?? "").trim();
   const model = (node.model ?? "").trim();
   if (providerId === "" || model === "") return null;
@@ -344,6 +358,35 @@ export function spawnExecution(
 /** Only these kinds spawn a worker, so only these can carry an execution. */
 export function spawnsThread(node: GraphNode): boolean {
   return node.kind === "agent" || node.kind === "dialog";
+}
+
+/**
+ * Kinds that hand a prompt to a worker and get an answer back — the ones a
+ * prompt, declared fields and failure routing apply to. Wider than
+ * `spawnsThread`: a `member` node does the same work as an agent node, it just
+ * reaches a thread that already exists.
+ */
+export function doesWork(node: GraphNode): boolean {
+  return node.kind === "agent" || node.kind === "dialog" || node.kind === "member";
+}
+
+/** `member@crew`, both parts in the Crew plugin's key syntax. */
+export const MEMBER_ADDRESS = /^[A-Za-z0-9][\w-]{0,63}@[A-Za-z0-9][\w-]{0,63}$/;
+
+/** Every `member` node of a graph and of the graphs it embeds, cycle-safe. */
+export function memberNodes(
+  graph: Graph,
+  resolve: GraphResolver = () => null,
+  seen: string[] = [],
+): GraphNode[] {
+  if (seen.includes(graph.id)) return [];
+  const trail = [...seen, graph.id];
+  return graph.nodes.flatMap((node) => {
+    if (node.kind === "member") return [node];
+    if (node.kind !== "subgraph") return [];
+    const child = resolve(node.graphId);
+    return child ? memberNodes(child, resolve, trail) : [];
+  });
 }
 
 export const edgeSchema = z.object({
@@ -550,7 +593,7 @@ export function validateGraph(
         message: `"${node.label}" is set to "every matching branch" but has only ${out.length === 0 ? "no" : "one"} outgoing edge; the setting has no effect.`,
       });
     }
-    if ((node.kind === "agent" || node.kind === "dialog") && node.prompt.trim() === "") {
+    if (doesWork(node) && node.prompt.trim() === "") {
       problems.push({
         level: "warning",
         message: `"${node.label}" has an empty prompt.`,
@@ -644,7 +687,7 @@ export function validateGraph(
     const node = graph.nodes.find((entry) => entry.id === nodeId);
     if (!node) return false;
     return (
-      node.onError === "route" && (node.kind === "agent" || node.kind === "dialog")
+      node.onError === "route" && doesWork(node)
     );
   };
   for (const edge of graph.edges) {
@@ -661,7 +704,7 @@ export function validateGraph(
     }
     if (routesFailure(subject)) continue;
     const reason =
-      node.kind === "agent" || node.kind === "dialog"
+      doesWork(node)
         ? `"${node.label}" ends the run when it fails`
         : `"${node.label}" is a ${KIND_LABEL[node.kind]} node and cannot fail`;
     problems.push(
@@ -681,7 +724,7 @@ export function validateGraph(
   );
   for (const node of graph.nodes) {
     if (node.onError !== "route") continue;
-    if (node.kind !== "agent" && node.kind !== "dialog") {
+    if (!doesWork(node)) {
       problems.push({
         level: "warning",
         message: `"${node.label}" is set to route its failure, but a ${KIND_LABEL[node.kind]} node spawns no worker and cannot fail; the setting has no effect.`,
@@ -715,11 +758,11 @@ export function validateGraph(
   for (const node of graph.nodes) {
     // A dialogue node answers with fields too — on its closing message, once
     // the interview is over.
-    if (node.kind === "agent" || node.kind === "dialog") continue;
+    if (doesWork(node)) continue;
     if (node.fields.length > 0) {
       problems.push({
         level: "warning",
-        message: `"${node.label}" is neither an agent nor a dialogue node; declared fields go unused.`,
+        message: `"${node.label}" is neither an agent, a dialogue nor a member node; declared fields go unused.`,
       });
     }
   }
@@ -792,6 +835,38 @@ export function validateGraph(
       problems.push({
         level: "warning",
         message: `"${node.label}" is a ${KIND_LABEL[node.kind]} node and starts no worker; the model choice goes unused.`,
+      });
+    }
+  }
+
+  // Member nodes. Whether the member exists is the Crew plugin's to say and
+  // is asked at save and at start (server.ts); here only what the graph
+  // itself can decide. A member node without a well-formed address has no
+  // thread to go to — and must never fall back to spawning one.
+  for (const node of graph.nodes) {
+    const address = node.member.trim();
+    if (node.kind === "member") {
+      if (address === "") {
+        problems.push({
+          level: "error",
+          message: `"${node.label}" is a Crew member node but names no member; write "member@crew".`,
+        });
+      } else if (!MEMBER_ADDRESS.test(address)) {
+        problems.push({
+          level: "error",
+          message: `"${node.label}" names the member "${address}", which is not a member address; write "member@crew".`,
+        });
+      }
+      if (node.skills.length > 0) {
+        problems.push({
+          level: "warning",
+          message: `"${node.label}" is a Crew member node; its skills come from the crew file, the node's skills go unused.`,
+        });
+      }
+    } else if (address !== "") {
+      problems.push({
+        level: "warning",
+        message: `"${node.label}" is a ${KIND_LABEL[node.kind]} node; the member "${address}" goes unused.`,
       });
     }
   }
@@ -1047,7 +1122,15 @@ export function validateGraph(
     // graph may contain a dialogue or approval node, so n branches would queue
     // n interrupts on one person — and whether it does is not visible on this
     // edge.
-    if (node.kind === "dialog" || node.kind === "human" || node.kind === "subgraph") {
+    // A member is one persistent thread: n branches would queue n tasks into
+    // the same conversation, each answer landing in whichever branch asked
+    // last. Refused for the same reason a dialogue is.
+    if (
+      node.kind === "dialog" ||
+      node.kind === "human" ||
+      node.kind === "subgraph" ||
+      node.kind === "member"
+    ) {
       problems.push({
         level: "error",
         message: `"${node.label}" is a ${KIND_LABEL[node.kind]} node and cannot be the target of a fan-out.`,

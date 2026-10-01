@@ -41,6 +41,7 @@ import {
   ToolboxIcon,
   ToolCaseIcon,
   UserAdd01Icon,
+  UserGroupIcon,
   WorkflowCircle03Icon,
   ZapIcon,
 } from "@hugeicons/core-free-icons";
@@ -141,6 +142,7 @@ const CORE_ICON_MAP = {
   ToolCase: ToolCaseIcon,
   Trash2: Delete02Icon,
   UserRoundPlus: UserAdd01Icon,
+  Users: UserGroupIcon,
   Workflow: WorkflowCircle03Icon,
   X: Cancel01Icon,
   Zap: ZapIcon,

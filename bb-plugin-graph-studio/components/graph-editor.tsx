@@ -52,6 +52,7 @@ const KIND_ICONS: Record<(typeof NODE_KINDS)[number], IconName> = {
   human: "CircleCheck",
   note: "Edit",
   subgraph: "Workflow",
+  member: "Users",
 };
 
 const KIND_LABELS: Record<(typeof NODE_KINDS)[number], string> = {
@@ -60,6 +61,7 @@ const KIND_LABELS: Record<(typeof NODE_KINDS)[number], string> = {
   human: "Approval (waits for you)",
   note: "Note (does nothing)",
   subgraph: "Subgraph (embeds another graph)",
+  member: "Crew member (a persistent member's thread does the step)",
 };
 
 /**
@@ -331,7 +333,7 @@ function NodeExecutionSection({
           ) : null}
         </div>
 
-        {node.kind === "agent" || node.kind === "dialog" ? (
+        {node.kind === "agent" || node.kind === "dialog" || node.kind === "member" ? (
           <label className="space-y-1">
             <span className="block text-[11px] text-muted-foreground">
               When the attempts are used up
@@ -417,7 +419,7 @@ function NodeExecutionSection({
           ) : null}
         </div>
 
-        {node.kind === "agent" || node.kind === "dialog" ? (
+        {node.kind === "agent" || node.kind === "dialog" || node.kind === "member" ? (
           <label className="space-y-1">
             <span className="block text-[11px] text-muted-foreground">
               When the attempts are used up
@@ -522,6 +524,9 @@ function issueText(path: ReadonlyArray<PropertyKey>, message: string): string {
   return message;
 }
 
+/** A Crew member the member picker offers (plugin `crew`, `listMembers`). */
+export type CrewMemberOption = { address: string; role: string; activity: string };
+
 export type AvailableSkill = {
   id: string;
   name: string;
@@ -536,6 +541,7 @@ export function GraphEditor({
   pending,
   availableSkills = [],
   skillsError = null,
+  crewMembers = [],
   onSave,
   onCancel,
   onClone,
@@ -554,6 +560,7 @@ export function GraphEditor({
   pending: boolean;
   availableSkills?: AvailableSkill[];
   skillsError?: string | null;
+  crewMembers?: CrewMemberOption[];
   onSave: (graph: Graph) => void;
   onCancel: () => void;
   onClone: (templateId: string, id: string, name: string) => void;
@@ -1546,6 +1553,47 @@ export function GraphEditor({
             </>,
           )}
 
+      {node.kind === "member"
+        ? section(
+            "Member",
+            node.member.trim() || "none chosen",
+            <div className="space-y-1">
+              <span className="block rounded-md bg-muted/40 px-2 py-1.5 text-[11px] text-muted-foreground">
+                <strong className="font-medium text-foreground">
+                  What a member node does:
+                </strong>{" "}
+                the step goes to a persistent member of a crew (plugin Crew)
+                instead of a fresh thread. The member keeps its memory across
+                visits and runs; provider and model come from the crew file.
+              </span>
+              <label className="block space-y-1">
+                <span className="block text-[11px] text-muted-foreground">
+                  Member — member@crew
+                </span>
+                <Input
+                  value={node.member}
+                  list={`crew-members-${index}`}
+                  placeholder="dev-owner@my-crew"
+                  onChange={(event) => patchNode(index, { member: event.target.value })}
+                  aria-label={`Member of node ${index + 1}`}
+                />
+                <datalist id={`crew-members-${index}`}>
+                  {crewMembers.map((member) => (
+                    <option key={member.address} value={member.address}>
+                      {member.role || member.activity}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+              {crewMembers.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">
+                  No crew members found in this project — type the address.
+                </p>
+              ) : null}
+            </div>,
+          )
+        : null}
+
       {spawnsThread(node)
         ? section(
             "Model",
@@ -1624,7 +1672,7 @@ export function GraphEditor({
           )
         : null}
 
-      {node.kind === "agent"
+      {node.kind === "agent" || node.kind === "member"
         ? section(
             "Result fields",
             node.fields.length > 0 ? `${node.fields.length}` : "none",

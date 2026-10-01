@@ -167,3 +167,40 @@ describe("dialogs", () => {
     expect(freshStore().listDialogs("run_x")).toEqual([]);
   });
 });
+
+describe("member_calls migration to rerun generations (BBP-15)", () => {
+  /** A database as it was before the generation existed, with one delivery. */
+  function legacyDatabase() {
+    const db = new Database(":memory:");
+    const upTo = MIGRATIONS.findIndex((statement) => statement.includes("CREATE TABLE IF NOT EXISTS member_calls ("));
+    expect(upTo).toBeGreaterThan(0);
+    for (const statement of MIGRATIONS.slice(0, upTo + 1)) db.exec(statement);
+    db.prepare(
+      `INSERT INTO member_calls (run_id, node_id, visit, attempt, message_id, event_cursor) VALUES ('run_old', 'owner', 1, 1, 'msg_old', 7)`,
+    ).run();
+    for (const statement of MIGRATIONS.slice(upTo + 1)) db.exec(statement);
+    return createStore(db);
+  }
+
+  it("keeps an earlier delivery as generation 0, so its resume still does not send", () => {
+    const store = legacyDatabase();
+    expect(store.getMemberCall({ runId: "run_old", gen: 0, nodeId: "owner", visit: 1, attempt: 1 })).toEqual({
+      messageId: "msg_old",
+      eventCursor: 7,
+    });
+  });
+
+  it("does not hand that delivery to generation 1 (negative)", () => {
+    const store = legacyDatabase();
+    expect(store.getMemberCall({ runId: "run_old", gen: 1, nodeId: "owner", visit: 1, attempt: 1 })).toBeNull();
+  });
+
+  it("stores one delivery per generation under the same visit and attempt", () => {
+    const store = legacyDatabase();
+    const key = { runId: "run_old", gen: 1, nodeId: "owner", visit: 1, attempt: 1 };
+    store.recordMemberCall(key, "msg_new");
+    store.recordMemberCall(key, "msg_ignored");
+    expect(store.getMemberCall(key)?.messageId).toBe("msg_new");
+    expect(store.getMemberCall({ ...key, gen: 0 })?.messageId).toBe("msg_old");
+  });
+});

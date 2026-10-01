@@ -1,0 +1,5 @@
+dist/
+node_modules/
+
+# Concept and research live in a private vault, not in this repository.
+docs/

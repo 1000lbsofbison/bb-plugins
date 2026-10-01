@@ -16,9 +16,9 @@ bb listen status
 ```
 
 Reports the runtime, whether `ffmpeg` and `node` are present, the language,
-which models are ready, and — the line people miss — what `BB_TRANSCRIPTION`
-is actually set to. The composer's microphone only reaches this plugin when
-that value is `listen/<model-id>`.
+which models are ready, and — the line people miss — which service BB's voice
+task is set to. The composer's microphone only reaches this plugin when that is
+`listen/listen` (`bb settings ai-services set voice listen`).
 
 ## Commands
 
@@ -64,8 +64,9 @@ after changing one.
 
 ## When something does not work
 
-- **The microphone produces nothing.** `BB_TRANSCRIPTION` is not pointed here,
-  or BB was not restarted after setting it. `bb listen status` shows both.
+- **The microphone produces nothing.** BB's voice task is not set to Listen
+  (`bb settings ai-services set voice listen`), or the model in the plugin's
+  settings is not downloaded. `bb listen status` shows both.
 - **"needs ffmpeg".** BB records compressed audio. Install ffmpeg.
 - **Speaking fails, recognition works.** Node is not on PATH. Synthesis runs in
   a separate `node` process because BB's Electron binary rejects the audio
