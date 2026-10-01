@@ -16,6 +16,7 @@ jobs:
       matrix:
         plugin:
           - bb-plugin-aside
+          - bb-plugin-crew
           - bb-plugin-graph-studio
           - bb-plugin-listen
           - bb-plugin-slim-nav

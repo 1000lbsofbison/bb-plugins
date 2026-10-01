@@ -3,6 +3,7 @@ updates:
   - package-ecosystem: "npm"
     directories:
       - "/bb-plugin-aside"
+      - "/bb-plugin-crew"
       - "/bb-plugin-graph-studio"
       - "/bb-plugin-listen"
       - "/bb-plugin-slim-nav"
