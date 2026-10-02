@@ -73,7 +73,8 @@ arranged in the studio are kept when your JSON has none.
 `graph_studio_run` with an `input` that carries everything the run needs: the
 task, constraints agreed here, what was ruled out, relevant file paths. The
 workers do not see this conversation. Put the `::graph-run{…}` line the tool
-returns into your reply so the user can watch the run.
+returns into your reply once, so the user can watch the run. Do not repeat it
+in later replies — the run stays visible above the composer.
 
 ## On the command line
 

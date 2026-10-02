@@ -1002,7 +1002,12 @@ function GraphCanvasInner({
     <div
       ref={hostRef}
       className={cn(
-        "h-[var(--gs-canvas-h)] overflow-hidden rounded-lg border border-border bg-background",
+        // `overflow-hidden` alone does not clip React Flow's transformed
+        // viewport in WebKit once an ancestor is itself transformed (the
+        // mobile sidebar drawer): the nodes escaped over the thread list.
+        // `clip-path` clips composited layers too; `relative` and `isolate`
+        // keep the absolutely positioned layers anchored to this box.
+        "relative isolate h-[var(--gs-canvas-h)] overflow-hidden rounded-lg border border-border bg-background [clip-path:inset(0_round_0.5rem)]",
         className,
       )}
       style={{ "--gs-canvas-h": `${canvasHeight}px` } as CSSProperties}

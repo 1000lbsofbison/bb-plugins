@@ -2118,7 +2118,7 @@ export default function graphStudio(bb: BbPluginApi) {
       // The directive renders the run live in the reply — its status, the
       // question it waits on and an answer box — and keeps the final picture
       // in the conversation afterwards.
-      return `Run ${startedId} started.\n\nPut this line into your reply exactly once, on its own line and outside any code block, so the user can watch the run in the chat:\n::graph-run{run="${startedId}"}`;
+      return `Run ${startedId} started.\n\nPut this line into your reply exactly once, on its own line and outside any code block, so the user can watch the run in the chat. Do not repeat it in later replies, also not when the run's status changes: the run stays visible above the composer.\n::graph-run{run="${startedId}"}`;
     },
   });
 

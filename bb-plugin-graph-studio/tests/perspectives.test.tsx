@@ -179,15 +179,24 @@ describe("inline run card", () => {
     expect(app.messageDirectives.map((entry) => entry.id)).toContain("graph-run");
   });
 
-  it("shows the run with the question it waits on", async () => {
+  it("stays a single line while the run is live: the banner holds the picture", async () => {
     const slot = card(
       makeRun({
         status: "waiting-human",
         pendingQuestion: { nodeId: firstNode, label: "Approval", question: "Ship it?" },
       }),
     );
-    expect(await slot.findByLabelText("Answer to the approval")).toBeTruthy();
-    expect(slot.getByText(/waiting for you/)).toBeTruthy();
+    expect(await slot.findByText(/live above the composer/)).toBeTruthy();
+    expect(slot.queryByLabelText("Answer to the approval")).toBeNull();
+    expect(slot.container.querySelector(".react-flow")).toBeNull();
+  });
+
+  it("draws a finished run once, however often the directive repeats", async () => {
+    const first = card(makeRun());
+    const second = card(makeRun());
+    await waitFor(() => expect(first.container.querySelector(".react-flow")).not.toBeNull());
+    await second.findAllByText(/done · 1 done/);
+    expect(second.container.querySelector(".react-flow")).toBeNull();
   });
 
   it("asks nothing of a finished run", async () => {
