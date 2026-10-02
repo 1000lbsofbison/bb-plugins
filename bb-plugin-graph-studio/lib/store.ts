@@ -2,6 +2,7 @@
 //
 // One append-only migration list, per the SDK's rule that shipped statements
 // are never reordered or edited.
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { Database } from "better-sqlite3";
 import { graphSchema, type Graph } from "./graph";
 
@@ -83,6 +84,11 @@ export const MIGRATIONS = [
   // would be a claim that the node was free.
   `ALTER TABLE node_runs ADD COLUMN input_tokens INTEGER`,
   `ALTER TABLE node_runs ADD COLUMN output_tokens INTEGER`,
+  `ALTER TABLE runs ADD COLUMN environment_id TEXT`,
+  `ALTER TABLE runs ADD COLUMN assignment_id TEXT`,
+  `CREATE UNIQUE INDEX runs_by_assignment ON runs (project_id, assignment_id) WHERE assignment_id IS NOT NULL`,
+  `ALTER TABLE runs ADD COLUMN execution_json TEXT`,
+  `ALTER TABLE runs ADD COLUMN environment_request_json TEXT`,
 ];
 
 export type RunStatus =
@@ -94,12 +100,20 @@ export type RunStatus =
 
 export type NodeRunStatus = "running" | "done" | "failed" | "skipped";
 
+export type RunExecution = Pick<NonNullable<Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["defaultExecutionOptions"]>>>, "model" | "reasoningLevel" | "serviceTier" | "permissionMode"> & { providerId: string };
+
+export type RunEnvironment = { type: "reuse"; environmentId: string } | { type: "host"; hostId: string; workspace: { type: "unmanaged"; path: string } };
+
 export type RunRow = {
   id: string;
   graphId: string;
   graph: Graph;
   threadId: string | null;
   projectId: string | null;
+  environmentId?: string | null;
+  assignmentId?: string | null;
+  execution?: RunExecution | null;
+  environmentRequest?: RunEnvironment | null;
   input: string;
   status: RunStatus;
   state: unknown;
@@ -139,13 +153,16 @@ export function createStore(db: Database) {
   const deleteGraphStmt = db.prepare(`DELETE FROM graphs WHERE id = ?`);
 
   const insertRunStmt = db.prepare(
-    `INSERT INTO runs (id, graph_id, graph_json, thread_id, project_id, input, status, state_json, error, created_at, updated_at)
-     VALUES (@id, @graphId, @graphJson, @threadId, @projectId, @input, @status, @stateJson, @error, @createdAt, @updatedAt)`,
+    `INSERT INTO runs (id, graph_id, graph_json, thread_id, project_id, environment_id, assignment_id, execution_json, environment_request_json, input, status, state_json, error, created_at, updated_at)
+     VALUES (@id, @graphId, @graphJson, @threadId, @projectId, @environmentId, @assignmentId, @executionJson, @environmentRequestJson, @input, @status, @stateJson, @error, @createdAt, @updatedAt)`,
   );
   const updateRunStmt = db.prepare(
     `UPDATE runs SET status = @status, state_json = @stateJson, error = @error, updated_at = @updatedAt WHERE id = @id`,
   );
   const getRunStmt = db.prepare(`SELECT * FROM runs WHERE id = ?`);
+  const attachEnvironmentStmt = db.prepare(`UPDATE runs SET environment_id = ? WHERE id = ? AND (environment_id IS NULL OR environment_id = ?)`);
+  const findAssignmentStmt = db.prepare(`SELECT * FROM runs WHERE project_id = ? AND assignment_id = ?`);
+  const listRunsByProjectStmt = db.prepare(`SELECT * FROM runs WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?`);
   const listRunsStmt = db.prepare(
     `SELECT * FROM runs ORDER BY updated_at DESC LIMIT ?`,
   );
@@ -200,6 +217,10 @@ export function createStore(db: Database) {
     graph: graphSchema.parse(JSON.parse(row.graph_json as string)),
     threadId: (row.thread_id as string | null) ?? null,
     projectId: (row.project_id as string | null) ?? null,
+    environmentId: (row.environment_id as string | null) ?? null,
+    assignmentId: (row.assignment_id as string | null) ?? null,
+    execution: row.execution_json ? JSON.parse(row.execution_json as string) as RunExecution : null,
+    environmentRequest: row.environment_request_json ? JSON.parse(row.environment_request_json as string) as RunEnvironment : null,
     input: row.input as string,
     status: row.status as RunStatus,
     state: JSON.parse(row.state_json as string),
@@ -261,6 +282,10 @@ export function createStore(db: Database) {
         graphJson: JSON.stringify(row.graph),
         threadId: row.threadId,
         projectId: row.projectId,
+        environmentId: row.environmentId ?? null,
+        assignmentId: row.assignmentId ?? null,
+        executionJson: row.execution ? JSON.stringify(row.execution) : null,
+        environmentRequestJson: row.environmentRequest ? JSON.stringify(row.environmentRequest) : null,
         input: row.input,
         status: row.status,
         stateJson: JSON.stringify(row.state),
@@ -285,6 +310,16 @@ export function createStore(db: Database) {
     getRun(id: string): RunRow | null {
       const row = getRunStmt.get(id) as Record<string, unknown> | undefined;
       return row ? toRun(row) : null;
+    },
+    attachRunEnvironment(runId: string, environmentId: string) {
+      if (attachEnvironmentStmt.run(environmentId, runId, environmentId).changes !== 1) throw new Error("Worker resolved a different execution environment for this run.");
+    },
+    findAssignment(projectId: string, assignmentId: string): RunRow | null {
+      const row = findAssignmentStmt.get(projectId, assignmentId) as Record<string, unknown> | undefined;
+      return row ? toRun(row) : null;
+    },
+    listRunsByProject(projectId: string, limit = 20): RunRow[] {
+      return (listRunsByProjectStmt.all(projectId, limit) as Array<Record<string, unknown>>).map(toRun);
     },
     listRuns(limit = 50): RunRow[] {
       return (listRunsStmt.all(limit) as Array<Record<string, unknown>>).map(toRun);

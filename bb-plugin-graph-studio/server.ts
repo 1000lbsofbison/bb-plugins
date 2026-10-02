@@ -5,8 +5,8 @@
 // a running server.
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { resolve, isAbsolute } from "node:path";
+import { defineRpcContract, defineCli, cliCommand, PluginCliError, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { Command } from "@langchain/langgraph";
 import {
@@ -23,7 +23,7 @@ import {
   type RunState,
 } from "./lib/graph";
 import { farewellMessage, orphanedWorkers } from "./lib/orphans";
-import { compileGraph, GuardStop, type RuntimeHost } from "./lib/runtime";
+import { compileGraph, GuardStop, WorkerEnvironmentError, type RuntimeHost } from "./lib/runtime";
 import {
   describeAttempt,
   describeGraph,
@@ -31,7 +31,7 @@ import {
   runTotal,
 } from "./lib/describe";
 import { SqliteCheckpointer } from "./lib/checkpointer";
-import { MIGRATIONS, createStore, type RunRow, type RunStatus } from "./lib/store";
+import { MIGRATIONS, createStore, type RunRow, type RunStatus, type RunExecution, type RunEnvironment } from "./lib/store";
 import { RENAMED_TEMPLATES, TEMPLATES, searchGraphs } from "./lib/templates";
 import { whileWorkspaceBusy } from "./lib/workspace";
 import { ACTIVITY_EVENT_TYPES, describeActivity } from "./lib/activity";
@@ -98,12 +98,28 @@ const runStateSchema = z.object({
   steps: z.number(),
 });
 
+const executionSchema = z.object({
+  providerId: z.string(), model: z.string(),
+  reasoningLevel: z.enum(["none", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]),
+  serviceTier: z.enum(["default", "fast"]),
+  permissionMode: z.enum(["accept-edits", "auto", "full"]),
+});
+
+const environmentRequestSchema = z.union([
+  z.object({ type: z.literal("reuse"), environmentId: z.string() }),
+  z.object({ type: z.literal("host"), hostId: z.string(), workspace: z.object({ type: z.literal("unmanaged"), path: z.string() }) }),
+]);
+
 const runSchema = z.object({
   id: z.string(),
   graphId: z.string(),
   graph: graphSchema,
   threadId: z.string().nullable(),
   projectId: z.string().nullable(),
+  environmentId: z.string().nullable(),
+  assignmentId: z.string().nullable(),
+  execution: executionSchema.nullable(),
+  environmentRequest: environmentRequestSchema.nullable(),
   input: z.string(),
   status: z.enum(["running", "waiting-human", "done", "failed", "stopped"]),
   state: runStateSchema,
@@ -315,6 +331,16 @@ export function fromGraphFile(json: string): Graph {
   return graph.data;
 }
 
+function effectiveExecution(frozen: RunExecution, override: ReturnType<typeof nodeExecution>): RunExecution {
+  return {
+    providerId: override?.providerId ?? frozen.providerId,
+    model: override?.model ?? frozen.model,
+    reasoningLevel: override?.reasoningLevel ?? frozen.reasoningLevel,
+    serviceTier: override?.serviceTier ?? frozen.serviceTier,
+    permissionMode: frozen.permissionMode,
+  };
+}
+
 export default function graphStudio(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
@@ -518,6 +544,10 @@ export default function graphStudio(bb: BbPluginApi) {
     if (!row) return null;
     return {
       ...row,
+      environmentId: row.environmentId ?? null,
+      assignmentId: row.assignmentId ?? null,
+      execution: row.execution ?? null,
+      environmentRequest: row.environmentRequest ?? null,
       state: row.state as RunState,
       nodeRuns: store
         .listNodeRuns(runId)
@@ -574,39 +604,166 @@ export default function graphStudio(bb: BbPluginApi) {
     }
   }
 
+  type ExecutionCatalog = Awaited<ReturnType<BbPluginApi["sdk"]["providers"]["models"]>>;
+
+  async function requireAssignedExecution(
+    execution: RunExecution,
+    environment: RunEnvironment,
+    label: string,
+    catalogs = new Map<string, ExecutionCatalog>(),
+  ) {
+    let catalog = catalogs.get(execution.providerId);
+    if (!catalog) {
+      try {
+        catalog = await bb.sdk.providers.models({
+          ...(environment.type === "reuse" ? { environmentId: environment.environmentId } : { hostId: environment.hostId }),
+          providerId: execution.providerId,
+        });
+      } catch (cause) {
+        throw new PluginCliError(`Cannot verify execution for "${label}": ${cause instanceof Error ? cause.message : String(cause)}`, { code: "execution_catalog_unavailable" });
+      }
+      catalogs.set(execution.providerId, catalog);
+    }
+    const refuse = (detail: string, code: string) => {
+      throw new PluginCliError(`Execution for "${label}" ${detail}`, { code });
+    };
+    const provider = catalog.providers.find(entry => entry.id === execution.providerId);
+    if (!provider?.available) refuse(`requires unavailable provider "${execution.providerId}".`, "execution_provider_unavailable");
+    if (environment.type === "host" && provider!.capabilities.modelCatalogScope === "workspace") {
+      refuse("requires an existing --environment to verify this workspace-scoped model catalogue.", "execution_workspace_catalog_required");
+    }
+    if (catalog.modelLoadError !== null) refuse("has an unreadable model catalogue; fallback models cannot authorize dispatch.", "execution_catalog_unavailable");
+    const model = [...catalog.models, ...catalog.selectedOnlyModels].find(entry => entry.model === execution.model || entry.id === execution.model);
+    if (!model) refuse(`requires model "${execution.model}" absent from provider "${execution.providerId}" on the execution machine.`, "execution_model_unavailable");
+    if (model!.routeProviderId && model!.routeProviderId !== execution.providerId) {
+      refuse("would route the requested model through a different provider.", "execution_provider_mismatch");
+    }
+    const permissions = ["accept-edits", "auto", "full"];
+    if (permissions.indexOf(execution.permissionMode) > permissions.indexOf(catalog.permissionCeiling)) {
+      refuse(`requests permission "${execution.permissionMode}" above the execution host ceiling "${catalog.permissionCeiling}".`, "execution_permission_ceiling");
+    }
+    if (!provider!.capabilities.permissionModes.includes(execution.permissionMode)) {
+      refuse(`requests unsupported permission mode "${execution.permissionMode}".`, "execution_permission_unsupported");
+    }
+    const modelReasoning = model!.supportedReasoningEfforts.map(entry => entry.reasoningEffort);
+    const providerReasoning = provider!.reasoningLevels?.map(entry => entry.id) ?? [];
+    // The selected model is precise; the provider ladder is only a fallback.
+    const allowedReasoning = modelReasoning.length > 0 ? modelReasoning : providerReasoning;
+    if (!allowedReasoning.includes(execution.reasoningLevel)) {
+      refuse(`requests reasoning "${execution.reasoningLevel}" that this model/provider does not authorize.`, "execution_reasoning_unsupported");
+    }
+    const tiers = provider!.serviceTiers?.map(entry => entry.id) ?? (provider!.capabilities.supportsServiceTier ? ["default", "fast"] : ["default"]);
+    if (!tiers.includes(execution.serviceTier) || (execution.serviceTier !== "default" && !provider!.capabilities.supportsServiceTier)) {
+      refuse(`requests unsupported service tier "${execution.serviceTier}".`, "execution_tier_unsupported");
+    }
+  }
+
+  async function preflightAssignedGraph(graph: Graph, execution: RunExecution, environment: RunEnvironment) {
+    const catalogs = new Map<string, ExecutionCatalog>();
+    const seen = new Set<string>();
+    const pendingGraphs = [graph];
+    while (pendingGraphs.length > 0) {
+      const current = pendingGraphs.pop()!;
+      if (seen.has(current.id)) continue;
+      seen.add(current.id);
+      for (const node of current.nodes) {
+        if (node.kind === "subgraph") {
+          const child = resolveGraph(node.graphId);
+          if (!child) throw new PluginCliError(`Unknown subgraph ${node.graphId}.`, { code: "graph_not_found" });
+          pendingGraphs.push(child);
+        } else if (node.kind === "agent" || node.kind === "dialog") {
+          await requireAssignedExecution(effectiveExecution(execution, nodeExecution(node)), environment, node.label, catalogs);
+        }
+      }
+    }
+  }
+
   function makeHost(
     runId: string,
     parentThreadId: string | null,
     projectId: string | null,
+    assignedEnvironmentId: string | null = null,
+    frozenExecution: RunExecution | null = null,
+    assignedEnvironment: RunEnvironment | null = null,
   ): RuntimeHost {
+    const acceptedWorkers = new Map<string, Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["spawn"]>>>();
+
+    async function verifyWorkerEnvironment(threadId: string) {
+      if (!assignedEnvironment) return;
+      try {
+        let worker = acceptedWorkers.get(threadId) ?? await bb.sdk.threads.get({ threadId });
+        const deadline = Date.now() + 2 * 60 * 1000;
+        for (;;) {
+          if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+          if (worker.id !== threadId || worker.projectId !== projectId || worker.deletedAt !== null) {
+            throw new Error("Worker identity/project does not match the accepted assignment.");
+          }
+          if (worker.environmentId) break;
+          if (["idle", "error", "stopping"].includes(worker.status) || Date.now() >= deadline) {
+            throw new Error("Worker environment did not become ready before startup ended or timed out.");
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          worker = await bb.sdk.threads.get({ threadId });
+        }
+        let environment = await bb.sdk.environments.get({ environmentId: worker.environmentId });
+        while (environment.status !== "ready") {
+          if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
+          if (["error", "destroyed"].includes(environment.status) || Date.now() >= deadline) {
+            throw new Error("Worker environment provisioning failed or timed out.");
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          environment = await bb.sdk.environments.get({ environmentId: worker.environmentId });
+        }
+        if (environment.id !== worker.environmentId || environment.projectId !== projectId) {
+          throw new Error("Resolved worker environment does not belong to the assigned project.");
+        }
+        const existing = store.getRun(runId)?.environmentId;
+        if ((existing && worker.environmentId !== existing) ||
+            (assignedEnvironment.type === "reuse" && worker.environmentId !== assignedEnvironment.environmentId) ||
+            (assignedEnvironment.type === "host" && (environment.hostId !== assignedEnvironment.hostId || environment.path !== assignedEnvironment.workspace.path))) {
+          throw new Error("Resolved worker environment does not match the assigned host/workspace or environment identity.");
+        }
+        store.attachRunEnvironment(runId, worker.environmentId);
+        acceptedWorkers.delete(threadId);
+        publish();
+      } catch (cause) {
+        if (cause instanceof GuardStop) throw cause;
+        throw new WorkerEnvironmentError(`Accepted worker ${threadId} environment verification failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }
+
     return {
       async spawn({ prompt, title, execution }) {
         if (stopping.has(runId)) throw new GuardStop("The run was stopped.");
         if (!parentThreadId) {
           throw new Error("A run needs a parent thread.");
         }
-        // Reuse the parent's environment so workers land in the same
-        // worktree the user is looking at, not a fresh checkout.
+        // An assignment's worker environment is independent of its context
+        // thread. Legacy runs continue inheriting the parent's environment.
         const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
-        if (!parent.environmentId) {
+        if (!parent.environmentId && !assignedEnvironment) {
           throw new Error(
             `Parent thread ${parentThreadId} has no environment a worker could inherit.`,
           );
         }
         // Read out once: inside the retry closure TypeScript can no longer
         // rely on the check above.
-        const environmentId = parent.environmentId;
+        const resolvedEnvironmentId = assignedEnvironment ? store.getRun(runId)?.environmentId ?? assignedEnvironmentId : parent.environmentId;
+        const environment = resolvedEnvironmentId
+          ? { type: "reuse" as const, environmentId: resolvedEnvironmentId }
+          : assignedEnvironment!;
         const projectIdForChild = projectId ?? parent.projectId;
         // A node without its own selection inherits the parent's provider. It
         // has to be named explicitly — omitting it makes BB reach for project
         // and catalog defaults instead. See `spawnExecution`.
-        const chosen = spawnExecution(execution, parent.providerId);
+        const chosen = spawnExecution(execution, frozenExecution?.providerId ?? parent.providerId);
         // BB does not accept a model without its provider, and provenance only
         // describes what the graph actually decided.
         const executionArgs =
           chosen === null
-            ? {}
+            ? { ...frozenExecution }
             : {
+                ...frozenExecution,
                 providerId: chosen.providerId,
                 ...(chosen.model !== null ? { model: chosen.model } : {}),
                 ...(chosen.reasoningLevel
@@ -630,6 +787,8 @@ export default function graphStudio(bb: BbPluginApi) {
                     }
                   : {}),
               };
+        const assignedExecution = frozenExecution ? effectiveExecution(frozenExecution, execution) : null;
+        if (assignedExecution) await requireAssignedExecution(assignedExecution, environment, title);
         // BB releases the previous worker's hold on the environment a moment
         // after that thread reports `idle`, so a node that spawns the next
         // worker right away is refused with 409 `workspace_busy`. Wait that gap
@@ -643,8 +802,18 @@ export default function graphStudio(bb: BbPluginApi) {
               origin: "plugin",
               parentThreadId,
               projectId: projectIdForChild,
-              environment: { type: "reuse", environmentId },
+              environment,
               ...executionArgs,
+              ...(assignedExecution ? {
+                ...assignedExecution,
+                executionInputSources: {
+                  providerId: "explicit" as const,
+                  model: "explicit" as const,
+                  reasoningLevel: "explicit" as const,
+                  serviceTier: "explicit" as const,
+                  permissionMode: "explicit" as const,
+                },
+              } : {}),
             }),
           {
             onWait: (attempt, waitedMs) =>
@@ -653,9 +822,13 @@ export default function graphStudio(bb: BbPluginApi) {
               ),
           },
         );
+        // Spawn acceptance precedes asynchronous environment provisioning. Return
+        // identity immediately: runtime persists it before awaitThread validates.
+        if (assignedEnvironment) acceptedWorkers.set(child.id, child);
         return child.id;
       },
       async awaitThread(threadId) {
+        await verifyWorkerEnvironment(threadId);
         // `wait` is race-free: it resolves immediately if the thread already
         // reached the status, so a fast child cannot slip past a listener.
         await bb.sdk.threads.wait({
@@ -770,6 +943,8 @@ export default function graphStudio(bb: BbPluginApi) {
   async function unknownModels(
     graph: Graph,
     parentThreadId: string | null,
+    environmentRequest: RunEnvironment | null = null,
+    assignedEnvironmentId: string | null = null,
   ): Promise<string[]> {
     const wanted = graph.nodes
       .map((node) => ({ node, execution: nodeExecution(node) }))
@@ -782,10 +957,9 @@ export default function graphStudio(bb: BbPluginApi) {
       // on a remote machine than on this one, so asking globally would bless a
       // model the worker's own machine cannot run.
       const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
-      if (!parent.environmentId) return [];
-      catalog = await bb.sdk.providers.models({
-        environmentId: parent.environmentId,
-      });
+      const environmentId = assignedEnvironmentId ?? (environmentRequest?.type === "reuse" ? environmentRequest.environmentId : environmentRequest ? null : parent.environmentId);
+      if (!environmentId && environmentRequest?.type !== "host") return [];
+      catalog = await bb.sdk.providers.models(environmentId ? { environmentId } : environmentRequest?.type === "host" ? { hostId: environmentRequest.hostId } : {});
     } catch (cause) {
       bb.log.warn(
         `Model catalogue unreadable, model check skipped: ${
@@ -833,14 +1007,14 @@ export default function graphStudio(bb: BbPluginApi) {
   ) {
     const row = store.getRun(runId);
     if (!row) return;
-    const host = makeHost(runId, row.threadId, row.projectId);
+    const host = makeHost(runId, row.threadId, row.projectId, row.environmentId ?? null, row.execution ?? null, row.environmentRequest ?? null);
 
     // Models are named in the graph but resolved on the machine that runs it.
     // A graph imported from elsewhere — or one authored while another provider
     // was installed — can name a model this host does not have, and BB would
     // quietly fall back to the inherited one. A silent downgrade is the worst
     // outcome here: the run looks right and costs or capability differ.
-    const unknown = await unknownModels(row.graph, row.threadId);
+    const unknown = row.execution ? [] : await unknownModels(row.graph, row.threadId, row.environmentRequest ?? null, row.environmentId ?? null);
     if (unknown.length > 0) {
       store.updateRun(
         runId,
@@ -936,7 +1110,25 @@ export default function graphStudio(bb: BbPluginApi) {
     input: string;
     threadId: string | null;
     projectId: string | null;
+    environmentId?: string | null;
+    assignmentId?: string | null;
+    execution?: RunExecution | null;
+    environmentRequest?: RunEnvironment | null;
   }): string {
+    if (args.assignmentId) {
+      if (!args.projectId || !args.environmentRequest || !args.threadId) {
+        throw new PluginCliError("Assignment launch requires project, thread and environment.", { code: "missing_execution_context" });
+      }
+      const existing = store.findAssignment(args.projectId, args.assignmentId);
+      if (existing) {
+        if (existing.graphId !== args.graphId || existing.input !== args.input ||
+            existing.threadId !== args.threadId || JSON.stringify(existing.environmentRequest) !== JSON.stringify(args.environmentRequest) ||
+            JSON.stringify(existing.execution) !== JSON.stringify(args.execution)) {
+          throw new PluginCliError("Assignment identity is already bound to a different immutable request.", { code: "assignment_mismatch" });
+        }
+        return existing.id;
+      }
+    }
     const graph = resolveGraph(args.graphId);
     if (!graph) throw new Error(`Unknown graph ${args.graphId}`);
     if (!args.threadId) {
@@ -960,6 +1152,10 @@ export default function graphStudio(bb: BbPluginApi) {
       graph,
       threadId: args.threadId,
       projectId: args.projectId,
+      environmentId: args.environmentId ?? null,
+      assignmentId: args.assignmentId ?? null,
+      execution: args.execution ?? null,
+      environmentRequest: args.environmentRequest ?? null,
       input: args.input,
       status: "running",
       state: emptyRunState(args.input),
@@ -1004,7 +1200,7 @@ export default function graphStudio(bb: BbPluginApi) {
   async function listCheckpointsFor(row: RunRow): Promise<{
     checkpoints: Array<{ checkpointId: string; next: string[]; doneCount: number }>;
   }> {
-    const host = makeHost(row.id, row.threadId, row.projectId);
+    const host = makeHost(row.id, row.threadId, row.projectId, row.environmentId ?? null, row.execution ?? null, row.environmentRequest ?? null);
     const app = compileGraph(row.graph, host, checkpointer, resolveGraph);
     const checkpoints: Array<{
       checkpointId: string;
@@ -1299,12 +1495,144 @@ export default function graphStudio(bb: BbPluginApi) {
     "                and asks me before merging",
   ].join("\n");
 
+  const scriptCli = defineCli({
+    name: "graph-studio",
+    summary: "Deterministic graph launch and reconciliation",
+    commands: {
+      execution: cliCommand({
+        summary: "Read complete execution settings without submitting a turn",
+        options: {
+          thread: { type: "string", required: true, description: "Execution context thread id" },
+          json: { type: "boolean", description: "Emit complete execution tuple as JSON" },
+        },
+        async run(input) {
+          const parent = await bb.sdk.threads.get({ threadId: input.options.thread });
+          const defaults = await bb.sdk.threads.defaultExecutionOptions({ threadId: input.options.thread });
+          if (!defaults) throw new PluginCliError("Execution context has no resolved execution settings.", { code: "missing_execution_options" });
+          const execution = executionSchema.parse({ providerId: parent.providerId, ...defaults });
+          return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ execution }) : JSON.stringify(execution, null, 2) + "\n" };
+        },
+      }),
+      run: cliCommand({
+        summary: "Start or recover an immutable assignment",
+        positionals: [{ name: "graph", required: true, description: "Graph id" }, { name: "task", variadic: true, description: "Task text" }],
+        options: {
+          "input-file": { type: "string", description: "UTF-8 assignment file on the invoking machine" },
+          "assignment-id": { type: "string", description: "Immutable attempt identity, scoped to project" },
+          "execution-json": { type: "string", description: "Complete immutable expected execution tuple; required with assignment id" },
+          project: { type: "string", description: "Explicit project id" },
+          thread: { type: "string", description: "Execution context thread id" },
+          environment: { type: "string", description: "Existing execution environment id, independent of context thread" },
+          host: { type: "string", description: "Explicit execution host id for unmanaged workspace" },
+          workspace: { type: "string", description: "Absolute unmanaged task workspace on execution host" },
+          json: { type: "boolean", description: "Emit full run DTO as JSON" },
+        },
+        constraints: [
+          { kind: "requires", option: "assignment-id", needs: ["project", "thread", "input-file", "execution-json"] },
+          { kind: "at-most-one", options: ["environment", "workspace"] },
+          { kind: "requires", option: "workspace", needs: ["host"] },
+          { kind: "requires", option: "host", needs: ["workspace"] },
+        ],
+        async run(input, ctx) {
+          const assignmentId = input.options["assignment-id"];
+          if (assignmentId !== undefined && (!assignmentId.trim() || assignmentId.length > 512)) {
+            throw new PluginCliError("Assignment identity must contain 1–512 characters.", { code: "invalid_assignment_id" });
+          }
+          const projectId = input.options.project ?? ctx.projectId ?? null;
+          const threadId = input.options.thread ?? ctx.threadId ?? null;
+          const environmentId = input.options.environment ?? null;
+          let environmentRequest: RunEnvironment | null = environmentId ? { type: "reuse", environmentId } : null;
+          if (input.options.workspace && input.options.host) {
+            if (!isAbsolute(input.options.workspace)) throw new PluginCliError("--workspace must be an absolute host path.", { code: "invalid_input" });
+            environmentRequest = { type: "host", hostId: input.options.host, workspace: { type: "unmanaged", path: input.options.workspace } };
+          }
+          if (assignmentId && !environmentRequest) throw new PluginCliError("Assignment needs --environment or --host with --workspace.", { code: "missing_execution_context" });
+          let task = input.positionals.task.join(" ");
+          if (input.options["input-file"]) {
+            if (task) throw new PluginCliError("Supply a task or --input-file, not both.", { code: "invalid_input" });
+            const invokingThread = ctx.threadId ?? threadId;
+            if (!invokingThread) throw new PluginCliError("File input needs --thread or invoking thread context.", { code: "missing_execution_context" });
+            if (!isAbsolute(input.options["input-file"]) && !ctx.cwd) {
+              throw new PluginCliError("Use an absolute --input-file path when invoking cwd is unavailable.", { code: "invalid_input" });
+            }
+            const caller = await bb.sdk.threads.get({ threadId: invokingThread });
+            if (!caller.environmentId) throw new PluginCliError("Invoking thread has no environment.");
+            const machine = await bb.sdk.environments.get({ environmentId: caller.environmentId });
+            const file = await bb.sdk.files.read({ path: resolve(ctx.cwd ?? ".", input.options["input-file"]), hostId: machine.hostId, signal: ctx.signal });
+            if (file.contentEncoding !== "utf8") throw new PluginCliError("Assignment file must be UTF-8.", { code: "invalid_input" });
+            task = file.content;
+          }
+          if (!task.trim() || task.length > 8000) throw new PluginCliError("Task must contain 1–8000 characters.", { code: "invalid_input" });
+          if (environmentRequest) {
+            if (!threadId || !projectId) throw new PluginCliError("Execution environment requires project and thread.", { code: "missing_execution_context" });
+            const parent = await bb.sdk.threads.get({ threadId });
+            if (parent.projectId !== projectId) throw new PluginCliError("Context thread belongs to a different project.", { code: "execution_context_mismatch" });
+            if (environmentId) {
+              const environment = await bb.sdk.environments.get({ environmentId });
+              if (environment.projectId !== projectId) throw new PluginCliError("Environment does not belong to project.", { code: "execution_context_mismatch" });
+            }
+          }
+          let execution: RunExecution | null = null;
+          if (assignmentId && threadId) {
+            const parent = await bb.sdk.threads.get({ threadId });
+            const defaults = await bb.sdk.threads.defaultExecutionOptions({ threadId });
+            if (!defaults) throw new PluginCliError("Execution context has no resolved execution settings.", { code: "missing_execution_options" });
+            execution = executionSchema.parse({ providerId: parent.providerId, ...defaults });
+          }
+          if (input.options["execution-json"]) {
+            let expected;
+            try { expected = executionSchema.strict().parse(JSON.parse(input.options["execution-json"])); }
+            catch { throw new PluginCliError("--execution-json must be a complete execution tuple.", { code: "invalid_execution_settings" }); }
+            if (JSON.stringify(expected) !== JSON.stringify(execution)) throw new PluginCliError("Execution context differs from the immutable assignment settings.", { code: "execution_context_mismatch" });
+          }
+          const existing = assignmentId && projectId ? store.findAssignment(projectId, assignmentId) : null;
+          if (!existing && execution && environmentRequest) {
+            const graph = resolveGraph(input.positionals.graph);
+            if (!graph) throw new PluginCliError(`Unknown graph ${input.positionals.graph}.`, { code: "graph_not_found" });
+            await preflightAssignedGraph(graph, execution, environmentRequest);
+          }
+          const id = startRun({ execution, environmentRequest, graphId: input.positionals.graph, input: task, projectId, threadId, environmentId, assignmentId: input.options["assignment-id"] });
+          return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ run: toDto(id) }) : `Run started: ${id}\n` };
+        },
+      }),
+      runs: cliCommand({
+        summary: "List runs, or recover one project assignment across all runs",
+        aliases: ["lookup"],
+        options: {
+          "assignment-id": { type: "string", description: "Exact assignment identity; lookup is not limited to recent runs" },
+          project: { type: "string", description: "Project id; required for assignment lookup" },
+          json: { type: "boolean", description: "Emit full run DTOs as JSON" },
+        },
+        constraints: [{ kind: "requires", option: "assignment-id", needs: ["project"] }],
+        run(input) {
+          const project = input.options.project;
+          const assignment = input.options["assignment-id"];
+          const found = project && assignment ? store.findAssignment(project, assignment) : null;
+          const rows = assignment ? (found ? [found] : []) : project ? store.listRunsByProject(project) : store.listRuns(20);
+          return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ runs: rows.map(row => toDto(row.id)) }) : rows.map(row => `${row.id}  ${row.status.padEnd(14)} ${row.graphId}`).join("\n") || "No runs.\n" };
+        },
+      }),
+      status: cliCommand({
+        summary: "Inspect full structured run status and results",
+        positionals: [{ name: "run", required: true, description: "Run id" }],
+        options: { json: { type: "boolean", description: "Emit full run DTO as JSON" } },
+        run(input) {
+          const run = toDto(input.positionals.run);
+          if (!run) throw new PluginCliError("Run not found.", { code: "run_not_found" });
+          return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ run }) : [`${run.id}  ${run.status}`, `Graph: ${run.graph.name}`, `Task: ${run.input}`, run.error ? `Error: ${run.error}` : "", ...run.nodeRuns.map(node => describeAttempt(node, Date.now())), runTotal(run.nodeRuns), run.pendingQuestion ? `Waiting for an answer: ${run.pendingQuestion.question}` : ""].filter(Boolean).join("\n") + "\n" };
+        },
+      }),
+    },
+  });
+
   bb.cli.register({
+    rendersHelp: true,
     name: "graph-studio",
     summary: "Build graphs and steer runs (cycles, routing, approvals)",
-    commands: CLI_COMMANDS,
+    commands: [...CLI_COMMANDS.filter(command => !["run", "runs", "status"].includes(command.name)), ...scriptCli.commands ?? []],
     run: async (argv: string[], ctx) => {
       const [command, ...rest] = argv;
+      if (["execution", "run", "runs", "lookup", "status"].includes(command ?? "")) return scriptCli.run(argv, ctx);
       const ok = (stdout: string) => ({ exitCode: 0, stdout: `${stdout}\n` });
       const fail = (stderr: string) => ({ exitCode: 1, stderr: `${stderr}\n` });
 
@@ -1331,47 +1659,6 @@ export default function graphStudio(bb: BbPluginApi) {
           const graph = rest[0] ? resolveGraph(rest[0]) : null;
           if (!graph) return fail("Graph not found.");
           return ok(describeGraph(graph, validateGraph(graph, resolveGraph)));
-        }
-        case "run": {
-          const [graphId, ...task] = rest;
-          if (!graphId || task.length === 0) {
-            return fail('Usage: bb graph-studio run <graph-id> "<task>"');
-          }
-          const runIdStarted = startRun({
-            graphId,
-            input: task.join(" "),
-            threadId: ctx.threadId ?? null,
-            projectId: ctx.projectId ?? null,
-          });
-          return ok(`Run started: ${runIdStarted}`);
-        }
-        case "runs": {
-          return ok(
-            store
-              .listRuns(20)
-              .map((row) => `${row.id}  ${row.status.padEnd(14)} ${row.graphId}`)
-              .join("\n") || "No runs.",
-          );
-        }
-        case "status": {
-          const dto = rest[0] ? toDto(rest[0]) : null;
-          if (!dto) return fail("Run not found.");
-          const lines = [
-            `${dto.id}  ${dto.status}`,
-            `Graph: ${dto.graph.name}`,
-            `Task: ${dto.input}`,
-            dto.error ? `Error: ${dto.error}` : "",
-            "",
-            ...dto.nodeRuns.map((node) => describeAttempt(node, Date.now())),
-            // The run total answers the question the per-node lines raise.
-            // Empty when nothing was measured, and then the blank line and the
-            // heading go away with it.
-            ...(runTotal(dto.nodeRuns) ? ["", runTotal(dto.nodeRuns)] : []),
-            dto.pendingQuestion
-              ? `\nWaiting for an answer: ${dto.pendingQuestion.question}`
-              : "",
-          ];
-          return ok(lines.filter(Boolean).join("\n"));
         }
         case "answer": {
           const [runId, ...answer] = rest;

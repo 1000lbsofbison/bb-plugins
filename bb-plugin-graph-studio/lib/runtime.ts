@@ -11,6 +11,7 @@
 import {
   Annotation,
   END,
+  GraphValueError,
   START,
   Send,
   StateGraph,
@@ -109,6 +110,11 @@ export type RuntimeHost = {
 
 /** Thrown when a guard stops the run; carries no stack noise into the UI. */
 export class GuardStop extends Error {}
+
+/** An accepted worker cannot be replaced when its environment is unverifiable.
+ * GraphValueError is LangGraph's public non-retryable value-error marker.
+ */
+export class WorkerEnvironmentError extends GraphValueError {}
 
 /** Backoff when the host does not supply one. */
 const defaultWait = (ms: number): Promise<void> =>
@@ -395,7 +401,7 @@ export function compileGraph(
             output: null,
             error: message,
           });
-          if (node.onError !== "route") throw cause;
+          if (cause instanceof WorkerEnvironmentError || node.onError !== "route") throw cause;
           // Same bargain as an agent node, minus the retry: a dialogue is a
           // conversation with a person in it, and starting it over from the
           // first question is not a retry of anything.
@@ -506,7 +512,7 @@ export function compileGraph(
         try {
           return await attempt();
         } catch (cause) {
-          if (isGraphBubbleUp(cause)) throw cause;
+          if (isGraphBubbleUp(cause) || cause instanceof WorkerEnvironmentError) throw cause;
           const message = cause instanceof Error ? cause.message : String(cause);
           // The empty string is how this state says "did not fail", so a
           // failure without a message must not be recorded as one.
