@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "graph": {
+    "id": "fixture-github-review",
+    "name": "Fixture \u2014 GitHub implement \u2192 independent review",
+    "description": "GitHub-only, review-only fixture lifecycle. The harness owns issue provisioning, exact-SHA verification, PR publication and labels. Based on the existing finalization-v2 routing; preserves all Necro graphs.",
+    "example": "Change Hello to Welcome in the greeting fixture, validate both tests and hand off a linked PR for review.",
+    "nodes": [
+      {
+        "id": "implementor",
+        "label": "Implementor",
+        "prompt": "Read AGENTS.md and the canonical GitHub issue via gh. The full JSON assignment below supplies run_id, repository, issue_url, project_id, workspace, branch, baseline, evidence_dir and acceptance. Verify pwd, origin remote, branch and base ancestry before work. Use only the assigned worktree. GitHub Issues are authoritative; no BB Tasks records. Keep the issue open. Harness owns GitHub comments, PR publication and completion assertions. Graph routing owns dispatch. Do not spawn other workers. Evidence files go in evidence_dir. Authorized git commits can require exec_command sandbox_permissions=require_escalated because shared Git metadata is read-only. Request that escalation with the concrete reason if needed. On rejection return BLOCKED with the stated reason.\nAssignment: {{input}}\nImplement the tiny acceptance change in greeting.py and test_greeting.py only. Run python3 -m unittest -v, commit with the full issue URL in the message, then run python3 tools/validate.py --evidence EVIDENCE_DIR --role implementor --run-id RUN_ID substituting the assignment values. Verify the checkout is clean. READY FOR REVIEW requires two passing tests, a full committed candidate_sha, and the validation record. Return one JSON object containing all declared result fields as your final response. validation_evidence is a native list field: return an array containing the absolute implementor.json path. On revisits address reviewer findings.\nLatest review: {{reviewer}}",
+        "fields": [
+          {
+            "name": "status",
+            "type": "enum",
+            "options": [
+              "READY FOR REVIEW",
+              "BLOCKED"
+            ],
+            "description": "READY FOR REVIEW only for a committed candidate with required implementation checks passing."
+          },
+          {
+            "name": "candidate_sha",
+            "description": "Full committed task SHA; empty if no valid candidate."
+          },
+          {
+            "name": "blockers",
+            "description": "Concrete blockers and decisions needed; empty when ready."
+          },
+          {
+            "name": "notes",
+            "description": "Concise changes, limitations and implementation evidence references."
+          },
+          {
+            "name": "validation_evidence",
+            "description": "Absolute validation record paths belonging to this run.",
+            "type": "list"
+          }
+        ],
+        "maxAttempts": 1,
+        "onError": "route"
+      },
+      {
+        "id": "reviewer",
+        "label": "Reviewer",
+        "prompt": "Read AGENTS.md and the canonical GitHub issue via gh. The full JSON assignment below supplies run_id, repository, issue_url, project_id, workspace, branch, baseline, evidence_dir and acceptance. Verify pwd, origin remote, branch and base ancestry before work. Use only the assigned worktree. GitHub Issues are authoritative; no BB Tasks records. Keep the issue open. Harness owns GitHub comments, PR publication and completion assertions. Graph routing owns dispatch. Do not spawn other workers. Evidence files go in evidence_dir. Authorized git commits can require exec_command sandbox_permissions=require_escalated because shared Git metadata is read-only. Request that escalation with the concrete reason if needed. On rejection return BLOCKED with the stated reason.\nAssignment: {{input}}\nIndependently review git diff BASELINE..CANDIDATE against the issue acceptance and fixture instructions. Check candidate is current HEAD, inspect both changed files, and run python3 tools/validate.py --evidence EVIDENCE_DIR --role reviewer --run-id RUN_ID. Verify greet() and greet(\"Ada\") return the exact Welcome strings and the two unit tests assert them. Do not modify or commit code. APPROVED requires the exact candidate SHA, clean checkout, two passing tests, correct behavior and no extra changed files. Report Standards and Spec findings. final_task_sha and approved_sha must equal the reviewed full SHA. validation_evidence is a native list field: return an array containing absolute reviewer.json path; assignment_sha256 is the value supplied in input. Return one JSON object containing all declared result fields as your final response.\nImplementation: {{implementor}}",
+        "fields": [
+          {
+            "name": "verdict",
+            "type": "enum",
+            "options": [
+              "APPROVED",
+              "CHANGES REQUIRED",
+              "BLOCKED"
+            ],
+            "description": "APPROVED for the exact final validated SHA, CHANGES REQUIRED for work to return, BLOCKED when the flow must stop."
+          },
+          {
+            "name": "final_task_sha",
+            "description": "Full final task tip after any Reviewer commits."
+          },
+          {
+            "name": "approved_sha",
+            "description": "Full final task SHA only for APPROVED; empty otherwise."
+          },
+          {
+            "name": "findings",
+            "description": "Standards and Spec outcomes; required findings separated from optional suggestions."
+          },
+          {
+            "name": "blockers",
+            "description": "What prevents continuation and what unblocks it; empty if none."
+          },
+          {
+            "name": "validation_evidence",
+            "description": "Absolute validation record paths belonging to this run.",
+            "type": "list"
+          },
+          {
+            "name": "assignment_sha256",
+            "description": "Frozen assignment digest read from the shared record; binds approval to base/scope/check policy."
+          }
+        ],
+        "maxAttempts": 1,
+        "onError": "route"
+      }
+    ],
+    "edges": [
+      {
+        "from": "__start__",
+        "to": "implementor"
+      },
+      {
+        "from": "implementor",
+        "to": "__end__",
+        "when": {
+          "source": "output",
+          "key": "implementor",
+          "op": "failed",
+          "value": ""
+        },
+        "label": "Agent failed \u2014 driver"
+      },
+      {
+        "from": "implementor",
+        "to": "reviewer",
+        "when": {
+          "source": "field",
+          "key": "implementor.status",
+          "op": "equals",
+          "value": "READY FOR REVIEW"
+        },
+        "label": "Ready for review"
+      },
+      {
+        "from": "implementor",
+        "to": "__end__",
+        "label": "BLOCKED / invalid handoff"
+      },
+      {
+        "from": "reviewer",
+        "to": "__end__",
+        "when": {
+          "source": "output",
+          "key": "reviewer",
+          "op": "failed",
+          "value": ""
+        },
+        "label": "Agent failed \u2014 driver"
+      },
+      {
+        "from": "reviewer",
+        "to": "__end__",
+        "when": {
+          "source": "field",
+          "key": "reviewer.verdict",
+          "op": "equals",
+          "value": "APPROVED"
+        },
+        "label": "APPROVED \u2014 finalizer"
+      },
+      {
+        "from": "reviewer",
+        "to": "implementor",
+        "when": {
+          "source": "field",
+          "key": "reviewer.verdict",
+          "op": "equals",
+          "value": "CHANGES REQUIRED"
+        },
+        "label": "CHANGES REQUIRED \u2014 max 3 passes"
+      },
+      {
+        "from": "reviewer",
+        "to": "__end__",
+        "label": "BLOCKED / review limit reached"
+      }
+    ],
+    "maxSteps": 6
+  }
+}
